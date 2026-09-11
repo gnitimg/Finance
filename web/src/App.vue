@@ -661,7 +661,7 @@ onBeforeUnmount(() => {
         <div class="headline-price">
           <strong>{{ currency(quote.price) }}</strong>
           <span :class="changeClass">{{ Number(quote.change || 0) >= 0 ? '+' : '' }}{{ number(quote.change) }} / {{ Number(quote.change_pct || 0) >= 0 ? '+' : '' }}{{ number(quote.change_pct) }}%</span>
-          <small><span v-if="openChangePct !== null" :class="openChangePct >= 0 ? 'positive' : 'negative'">较开盘 {{ openChangePct >= 0 ? '+' : '' }}{{ number(openChangePct) }}%</span><template v-if="openChangePct !== null"> · </template>{{ quote.market_state === 'REGULAR' || quote.market_state === 'OPEN_24_7' ? '交易中' : '已收盘' }} · {{ dateTime(quote.as_of) }}</small>
+          <small><span v-if="quote.realtime === false" class="delay-flag">延迟行情</span><template v-if="quote.realtime === false"> · </template><span v-if="openChangePct !== null" :class="openChangePct >= 0 ? 'positive' : 'negative'">较开盘 {{ openChangePct >= 0 ? '+' : '' }}{{ number(openChangePct) }}%</span><template v-if="openChangePct !== null"> · </template>{{ quote.market_state === 'REGULAR' || quote.market_state === 'OPEN_24_7' ? '交易中' : '已收盘' }} · {{ dateTime(quote.as_of) }}</small>
         </div>
       </section>
 

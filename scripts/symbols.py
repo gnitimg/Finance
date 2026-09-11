@@ -17,6 +17,9 @@ METAL_YAHOO = {
     "GOLD": "GC=F", "SILVER": "SI=F", "PLATINUM": "PL=F",
     "PALLADIUM": "PA=F", "COPPER": "HG=F",
 }
+# Sina international-futures snapshots are near-live; Yahoo futures feeds run
+# roughly ten minutes behind. Symbols without a Sina code stay on Yahoo.
+METAL_SINA = {"GOLD": "hf_GC", "SILVER": "hf_SI", "COPPER": "hf_HG"}
 ALIASES = {
     "TENCENT": ("hk", "00700"),
     "腾讯": ("hk", "00700"),

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from ..cache import CACHE
 from ..models import FinanceError
-from ..symbols import normalize
+from ..symbols import METAL_SINA, normalize
 from .coingecko import market_chart, quote_crypto
-from .sina import quote_cn
+from .sina import quote_cn, quote_hf
 from .yahoo import chart
 
 
@@ -29,6 +29,12 @@ def quote(market: str, symbol: str) -> dict:
             result, http_meta = quote_cn(symbol)
         elif market == "crypto":
             result, http_meta = quote_crypto(symbol)
+        elif market == "metal" and symbol in METAL_SINA:
+            try:
+                result, http_meta = quote_hf(METAL_SINA[symbol], symbol)
+            except FinanceError:
+                result, http_meta = chart(market, symbol, "5d", "15m")
+                result["warnings"] = list(result.get("warnings") or []) + ["Sina snapshot unavailable; quote uses the delayed Yahoo futures feed."]
         else:
             result, http_meta = chart(market, symbol, "5d", "15m")
         result["provider_timing"] = http_meta
@@ -65,6 +71,15 @@ def history(market: str, symbol: str, range_name: str = "3mo", interval: str = "
                     result["asset"].update({k: v for k, v in live["asset"].items() if v})
                 except FinanceError:
                     result.setdefault("warnings", []).append("Sina snapshot unavailable; quote uses Yahoo chart metadata")
+            elif market == "metal" and symbol in METAL_SINA:
+                try:
+                    live = quote_hf(METAL_SINA[symbol], symbol)[0]
+                    stale_fields = {key: value for key, value in result["quote"].items() if live["quote"].get(key) is None}
+                    result["quote"] = live["quote"]
+                    result["quote"].update(stale_fields)
+                    result.setdefault("warnings", []).append("Bars follow the delayed Yahoo futures feed; the headline quote is the near-live Sina snapshot.")
+                except FinanceError:
+                    result.setdefault("warnings", []).append("Sina snapshot unavailable; quote uses the delayed Yahoo futures feed.")
         CACHE.set(key, result)
         return _with_cache_meta(result, {"cached": False, "stale": False, "age_seconds": 0})
     except FinanceError as exc:
