@@ -174,7 +174,7 @@ function signalLabel(value) {
   const macd = text.match(/^MACD histogram ([-\d.]+)$/)
   if (macd) return `MACD 柱值 ${macd[1]}`
   const volume = text.match(/^Relative volume ([\d.]+)×$/)
-  if (volume) return `相对成交量 ${volume[1]}×`
+  if (volume) return Number(volume[1]) > 0 ? `相对成交量 ${volume[1]}×` : '相对成交量形成中'
   return text
 }
 function levelLabel(value) {

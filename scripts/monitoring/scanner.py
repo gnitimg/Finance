@@ -14,6 +14,14 @@ def _tier(value: float, threshold: float) -> int:
     return max(1, min(3, int(abs(value) / max(threshold, 1e-8))))
 
 
+def _volume_text(relative_volume: float) -> str:
+    # A zero-volume forming bar carries no volume evidence yet; presenting it
+    # as "0.00x" reads like a measured collapse in activity.
+    if relative_volume > 0:
+        return f"相对量能 {relative_volume:.2f}×"
+    return "量能仍在形成"
+
+
 def scan(data: dict, thresholds: dict) -> dict:
     asset = data.get("asset") or {}
     quote = data.get("quote") or {}
@@ -41,7 +49,7 @@ def scan(data: dict, thresholds: dict) -> dict:
             "category": "anomaly", "direction": direction, "score": round(min(100.0, intensity * 55), 2),
             "trigger": "price_change" if abs(change_pct) >= price_threshold else "relative_volume",
             "title": f"{asset.get('symbol')} 出现{'上行' if direction == 'up' else '下行' if direction == 'down' else '量能'}异动",
-            "summary": f"日内变动 {change_pct:+.2f}% · 相对量能 {relative_volume:.2f}×",
+            "summary": f"日内变动 {change_pct:+.2f}% · {_volume_text(relative_volume)}",
             "evidence": [f"价格变动阈值 {price_threshold:.2f}%", f"量能阈值 {volume_threshold:.2f}×"],
             "tier": _tier(max(abs(change_pct), relative_volume), max(price_threshold, volume_threshold)),
         })

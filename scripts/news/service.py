@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from urllib.parse import quote, urlencode
@@ -7,13 +8,37 @@ import xml.etree.ElementTree as ET
 
 from ..cache import CACHE
 from ..http_client import request_bytes, request_json
+from ..models import FinanceError
 from ..symbols import normalize, yahoo_symbol
 from .sentiment import analyze as sentiment_analysis
 
+GDELT_FAILURE_THRESHOLD = 2
+GDELT_COOLDOWN_SECONDS = 600
+_GDELT_STATE = {"consecutive_failures": 0}
+_GDELT_COOLDOWN_KEY = "news:gdelt:cooldown"
+
+
+def _gdelt_cooldown_until() -> float:
+    marker, _ = CACHE.get(_GDELT_COOLDOWN_KEY, 3600)
+    return float((marker or {}).get("until") or 0)
+
 
 def _gdelt(query_text: str, limit: int) -> list[dict]:
-    params = urlencode({"query": query_text, "mode": "artlist", "maxrecords": min(limit, 25), "format": "json", "sort": "hybridrel", "timespan": "7d"})
-    payload, _ = request_json(f"https://api.gdeltproject.org/api/v2/doc/doc?{params}", timeout=9, attempts=1)
+    now = time.time()
+    if now < _gdelt_cooldown_until():
+        raise FinanceError("PROVIDER_COOLDOWN", "GDELT skipped during failure cooldown", "gdelt")
+    try:
+        params = urlencode({"query": query_text, "mode": "artlist", "maxrecords": min(limit, 25), "format": "json", "sort": "hybridrel", "timespan": "7d"})
+        payload, _ = request_json(f"https://api.gdeltproject.org/api/v2/doc/doc?{params}", timeout=4.5, attempts=1)
+    except Exception:
+        failures = _GDELT_STATE["consecutive_failures"] + 1
+        _GDELT_STATE["consecutive_failures"] = failures
+        if failures >= GDELT_FAILURE_THRESHOLD or _gdelt_cooldown_until() > now:
+            CACHE.set(_GDELT_COOLDOWN_KEY, {"until": now + GDELT_COOLDOWN_SECONDS})
+        raise
+    _GDELT_STATE["consecutive_failures"] = 0
+    if _gdelt_cooldown_until():
+        CACHE.set(_GDELT_COOLDOWN_KEY, {"until": 0})
     articles = payload.get("articles") if isinstance(payload, dict) else []
     result = []
     for item in articles or []:

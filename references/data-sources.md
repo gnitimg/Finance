@@ -10,4 +10,4 @@
 | Stablecoin supply | DefiLlama | Supply context, never used as a price source. |
 | News | GDELT + Yahoo Finance RSS | Concurrent and independently degradable; absence does not imply no event. |
 
-The web interface refreshes the selected asset every 15 seconds. News content is cached separately, while price/volume/range sentiment is recomputed against current market context. This is continuous near-live updating, not a promise of exchange-colocated low latency. Every response contains `source`, `feed`, `as_of`, and cache fields.
+The web interface refreshes the selected quote every 3 seconds, reruns the model analysis every 10 seconds, and rescans the watchlist every 8 seconds. News content is cached separately, while price/volume/range sentiment is recomputed against current market context. This is continuous near-live updating, not a promise of exchange-colocated low latency. Every response contains `source`, `feed`, `as_of`, and cache fields.

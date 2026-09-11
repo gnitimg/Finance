@@ -34,11 +34,17 @@ app.use(helmet({
   contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:'], connectSrc: ["'self'"], fontSrc: ["'self'", 'data:'], objectSrc: ["'none'"], frameAncestors: ["'none'"] } },
   crossOriginEmbedderPolicy: false,
   strictTransportSecurity: false,
+  xFrameOptions: { action: 'deny' },
 }))
 app.use(compression({ filter: (req, res) => req.path === '/api/stream' ? false : compression.filter(req, res) }))
 app.use(express.json({ limit: '20kb' }))
-app.use('/api', rateLimit({ windowMs: 60_000, limit: 240, standardHeaders: 'draft-8', legacyHeaders: false }))
+// Per-visitor quota keyed on the client IP attested by Cloudflare, with a
+// coarser per-edge backstop so direct-to-origin callers cannot rotate keys.
+const visitorKey = (req, res) => req.get('CF-Connecting-IP') || req.ip
+app.use('/api', rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: 'draft-8', legacyHeaders: false }))
+app.use('/api', rateLimit({ windowMs: 60_000, limit: 240, standardHeaders: 'draft-8', legacyHeaders: false, keyGenerator: visitorKey }))
 
+const MEMORY_LIMIT = 400
 const memory = new Map()
 const pending = new Map()
 async function cached(key, ttlMs, task) {
@@ -46,6 +52,10 @@ async function cached(key, ttlMs, task) {
   if (entry && Date.now() - entry.at < ttlMs) return entry.value
   if (pending.has(key)) return pending.get(key)
   const promise = task().then((value) => {
+    if (memory.size >= MEMORY_LIMIT && !memory.has(key)) {
+      const oldest = memory.keys().next().value
+      memory.delete(oldest)
+    }
     memory.set(key, { value, at: Date.now() })
     pending.delete(key)
     return value
@@ -148,6 +158,8 @@ app.get('/api/stream', (req, res) => {
 })
 
 setInterval(() => broadcast('heartbeat', { at: new Date().toISOString() }), 10_000).unref()
+
+app.use('/api', (_req, res) => res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'unknown API endpoint' } }))
 
 app.use(express.static(DIST, { index: false, maxAge: '1h', immutable: false }))
 app.get('*', (_req, res) => res.sendFile(path.join(DIST, 'index.html')))

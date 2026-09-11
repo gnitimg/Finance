@@ -9,25 +9,72 @@ from ..providers.service import quote
 from ..symbols import STABLECOINS
 
 
-def _dex(symbol: str, config: dict) -> dict:
-    url = f"https://api.dexscreener.com/token-pairs/v1/{config['chain']}/{config['contract']}"
-    payload, meta = request_json(url, timeout=8, attempts=2)
+def _pair_price(symbol: str, pair: dict) -> float | None:
+    # priceUsd always prices the base token. When the stablecoin sits on the
+    # quote side, derive its own USD price from the base price and the base
+    # price denominated in the stablecoin.
+    base = (pair.get("baseToken") or {}).get("symbol", "").upper()
+    try:
+        price_usd = float(pair.get("priceUsd"))
+    except (TypeError, ValueError):
+        return None
+    if base == symbol:
+        return price_usd
+    try:
+        price_native = float(pair.get("priceNative"))
+    except (TypeError, ValueError):
+        return None
+    if price_native <= 0:
+        return None
+    return price_usd / price_native
+
+
+def _pairs_for_contract(chain: str, contract: str) -> tuple[list, dict]:
+    payload, meta = request_json(f"https://api.dexscreener.com/token-pairs/v1/{chain}/{contract}", timeout=8, attempts=2)
     if not isinstance(payload, list):
         raise FinanceError("INVALID_SCHEMA", "DexScreener response is not a list", "dexscreener")
+    return payload, meta
+
+
+def _collect(symbol: str, allowed: set, payloads: list) -> list:
     candidates = []
-    allowed = set(config.get("counter_assets") or [])
-    for pair in payload:
-        base = (pair.get("baseToken") or {}).get("symbol", "").upper()
-        counter = (pair.get("quoteToken") or {}).get("symbol", "").upper()
-        liquidity = float((pair.get("liquidity") or {}).get("usd") or 0)
-        if base != symbol or counter not in allowed or liquidity < 10_000:
-            continue
-        try:
-            price = float(pair.get("priceUsd"))
-        except (TypeError, ValueError):
-            continue
-        candidates.append({"dex": pair.get("dexId"), "pair": f"{base}/{counter}", "price_usd": price, "liquidity_usd": liquidity, "url": pair.get("url")})
+    for payload in payloads:
+        for pair in payload:
+            base = (pair.get("baseToken") or {}).get("symbol", "").upper()
+            counter = (pair.get("quoteToken") or {}).get("symbol", "").upper()
+            liquidity = float((pair.get("liquidity") or {}).get("usd") or 0)
+            counterpart = counter if base == symbol else base if counter == symbol else None
+            if counterpart is None or counterpart not in allowed or liquidity < 10_000:
+                continue
+            price = _pair_price(symbol, pair)
+            if price is None or price <= 0:
+                continue
+            candidates.append({"dex": pair.get("dexId"), "pair": f"{base}/{counter}", "price_usd": price, "liquidity_usd": liquidity, "url": pair.get("url")})
     candidates.sort(key=lambda item: item["liquidity_usd"], reverse=True)
+    return candidates
+
+
+def _dex(symbol: str, config: dict) -> dict:
+    payload, meta = _pairs_for_contract(config["chain"], config["contract"])
+    allowed = set(config.get("counter_assets") or [])
+    candidates = _collect(symbol, allowed, [payload])
+    if not candidates:
+        # Deep pools often key the stablecoin as the quote asset, so they are
+        # listed under the counter asset's contract. Probe up to two configured
+        # counter contracts before giving up.
+        catalog = read_json("stablecoins.json")
+        fallback_contracts = [
+            (item["contract"],) for item in (catalog.get(counter, {}) for counter in allowed)
+            if item.get("chain") == config["chain"] and item.get("contract")
+        ]
+        extra = []
+        for entry in fallback_contracts[:2]:
+            try:
+                counter_payload, _ = _pairs_for_contract(config["chain"], entry[0])
+            except FinanceError:
+                continue
+            extra.append(counter_payload)
+        candidates = _collect(symbol, allowed, extra)
     if not candidates:
         raise FinanceError("NO_DATA", "No verified liquid DEX pair found", "dexscreener")
     prices = [item["price_usd"] for item in candidates[:5]]

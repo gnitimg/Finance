@@ -10,9 +10,13 @@ from .config import DATA_DIR
 
 
 class Cache:
+    PRUNE_INTERVAL = 600
+    RETENTION_SECONDS = 86_400
+
     def __init__(self, path: Path | None = None):
         self.path = path or DATA_DIR / "cache.sqlite3"
         self._lock = threading.Lock()
+        self._last_prune = 0.0
         with self._connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, created REAL NOT NULL)")
 
@@ -31,8 +35,12 @@ class Cache:
 
     def set(self, key: str, value: dict) -> None:
         payload = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        now = time.time()
         with self._lock, self._connect() as db:
-            db.execute("INSERT INTO cache(key,value,created) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,created=excluded.created", (key, payload, time.time()))
+            db.execute("INSERT INTO cache(key,value,created) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,created=excluded.created", (key, payload, now))
+            if now - self._last_prune > self.PRUNE_INTERVAL:
+                self._last_prune = now
+                db.execute("DELETE FROM cache WHERE created < ?", (now - self.RETENTION_SECONDS,))
 
     def count(self) -> int:
         with self._connect() as db:
