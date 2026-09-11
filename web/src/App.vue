@@ -108,6 +108,12 @@ const technical = computed(() => data.value.technical || {})
 const forecast = computed(() => data.value.ml_forecast || {})
 const marketSentiment = computed(() => data.value.market_sentiment || state.news?.market_sentiment || {})
 const changeClass = computed(() => Number(quote.value.change_pct || 0) >= 0 ? 'positive' : 'negative')
+const openChangePct = computed(() => {
+  const open = Number(quote.value.open)
+  const price = Number(quote.value.price)
+  if (!Number.isFinite(open) || open <= 0 || !Number.isFinite(price) || price <= 0) return null
+  return (price / open - 1) * 100
+})
 const providerSummary = computed(() => Object.entries(state.health?.data?.providers || {}))
 const selectedMarketOption = computed(() => marketOptions.find((option) => option.value === searchMarket.value) || marketOptions[0])
 const unreadCount = computed(() => notifications.value.filter((item) => !item.read).length)
@@ -215,6 +221,17 @@ function safeUrl(value) {
     const url = new URL(value)
     return ['http:', 'https:'].includes(url.protocol) ? url.href : '#'
   } catch { return '#' }
+}
+
+function quoteEpoch(value) {
+  const time = Date.parse(String(value || ''))
+  return Number.isFinite(time) ? time : 0
+}
+
+// Several loaders merge quote payloads produced by different cache layers;
+// a stale layer must never drag the displayed price or chart backwards.
+function isFreshQuote(incoming, current) {
+  return quoteEpoch(incoming?.as_of) >= quoteEpoch(current?.as_of)
 }
 
 function categoryLabel(value) {
@@ -409,8 +426,6 @@ async function loadMonitor({ quiet = true } = {}) {
     state.lastSync = state.monitorAt
     reconcileAlerts(payload.data.alerts, payload.data.items)
     ingestAlerts(payload.data.alerts)
-    const current = state.overview.find((item) => item.asset.market === state.market && item.asset.symbol === state.symbol)
-    if (current && state.analysis?.data?.quote) Object.assign(state.analysis.data.quote, current.quote)
     if (!quiet && payload.data.failures?.length) showToast(`${payload.data.failures.length} 个标的暂时无法更新`)
   } catch (error) {
     if (!quiet) showToast(friendlyError(error.message))
@@ -427,10 +442,12 @@ async function loadQuote() {
   try {
     const payload = await fetchJson(`/api/quote?market=${encodeURIComponent(state.market)}&symbol=${encodeURIComponent(state.symbol)}`)
     if (`${state.market}:${state.symbol}` !== activeKey) return
-    Object.assign(state.analysis.data.asset, payload.data.asset || {})
-    Object.assign(state.analysis.data.quote, payload.data.quote || {})
+    if (isFreshQuote(payload.data.quote, state.analysis.data.quote)) {
+      Object.assign(state.analysis.data.asset, payload.data.asset || {})
+      Object.assign(state.analysis.data.quote, payload.data.quote || {})
+    }
     const current = state.overview.find((item) => item.asset.market === state.market && item.asset.symbol === state.symbol)
-    if (current) Object.assign(current.quote, payload.data.quote || {})
+    if (current && isFreshQuote(payload.data.quote, current.quote)) Object.assign(current.quote, payload.data.quote || {})
     state.lastSync = new Date(payload.generated_at)
   } catch {}
   finally { quoteBusy = false }
@@ -441,6 +458,11 @@ async function loadAsset({ market = state.market, symbol = state.symbol, period 
   try {
     const params = new URLSearchParams({ market, symbol, range: period.range, interval: period.interval })
     const payload = await fetchJson(`/api/analyze?${params}`)
+    const displayedQuote = quiet ? state.analysis?.data?.quote : null
+    if (displayedQuote && !isFreshQuote(payload.data.quote, displayedQuote)) {
+      state.lastSync = new Date(payload.generated_at)
+      return
+    }
     state.analysis = payload
     state.market = payload.data.asset.market
     state.symbol = payload.data.asset.symbol
@@ -639,7 +661,7 @@ onBeforeUnmount(() => {
         <div class="headline-price">
           <strong>{{ currency(quote.price) }}</strong>
           <span :class="changeClass">{{ Number(quote.change || 0) >= 0 ? '+' : '' }}{{ number(quote.change) }} / {{ Number(quote.change_pct || 0) >= 0 ? '+' : '' }}{{ number(quote.change_pct) }}%</span>
-          <small>{{ quote.market_state === 'REGULAR' || quote.market_state === 'OPEN_24_7' ? '交易中' : '已收盘' }} · {{ dateTime(quote.as_of) }}</small>
+          <small><span v-if="openChangePct !== null" :class="openChangePct >= 0 ? 'positive' : 'negative'">较开盘 {{ openChangePct >= 0 ? '+' : '' }}{{ number(openChangePct) }}%</span><template v-if="openChangePct !== null"> · </template>{{ quote.market_state === 'REGULAR' || quote.market_state === 'OPEN_24_7' ? '交易中' : '已收盘' }} · {{ dateTime(quote.as_of) }}</small>
         </div>
       </section>
 
@@ -684,8 +706,11 @@ onBeforeUnmount(() => {
         <article class="panel metric-panel">
           <div class="panel-head"><div><span class="section-index">03</span><h3>市场剖面</h3></div></div>
           <div class="metrics">
+            <div><span>开盘价</span><strong>{{ number(quote.open, 3) }}</strong></div>
             <div><span>日内高点</span><strong>{{ number(quote.high, 3) }}</strong></div>
             <div><span>日内低点</span><strong>{{ number(quote.low, 3) }}</strong></div>
+            <div><span>昨收</span><strong>{{ number(quote.previous_close, 3) }}</strong></div>
+            <div><span>较开盘</span><strong :class="openChangePct === null ? '' : openChangePct >= 0 ? 'positive' : 'negative'">{{ openChangePct === null ? '—' : `${openChangePct >= 0 ? '+' : ''}${number(openChangePct)}%` }}</strong></div>
             <div><span>成交量</span><strong>{{ compact(quote.volume) }}</strong></div>
             <div><span>RSI 14</span><strong>{{ number(technical.rsi14, 1) }}</strong></div>
             <div><span>ATR</span><strong>{{ number(technical.atr_pct, 2) }}<small>%</small></strong></div>
