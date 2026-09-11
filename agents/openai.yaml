@@ -1,0 +1,7 @@
+interface:
+  display_name: "Finance Real-time Analysis"
+  short_description: "Live market data, technical signals, and risk analysis"
+  brand_color: "#B8FF5A"
+  default_prompt: "Use $finance to fetch verified market data and produce a grounded financial analysis."
+policy:
+  allow_implicit_invocation: true

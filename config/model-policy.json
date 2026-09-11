@@ -1,0 +1,19 @@
+{
+  "allow_paid_models": false,
+  "providers": {
+    "opencode_zen": {
+      "endpoint": "https://opencode.ai/zen/v1/chat/completions",
+      "allowed_models": [
+        "hy3-free",
+        "deepseek-v4-flash-free",
+        "nemotron-3-ultra-free",
+        "nemotron-3.5-lightning-free"
+      ]
+    },
+    "google": {
+      "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      "allowed_models": ["gemini-3.5-flash-lite", "gemini-flash-lite-latest"]
+    }
+  },
+  "max_runtime_attempts": 2
+}

@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "assets": [
+    {"market": "us", "symbol": "NVDA", "categories": ["potential", "risk", "anomaly"]},
+    {"market": "us", "symbol": "AAPL", "categories": ["potential", "risk", "anomaly"]},
+    {"market": "hk", "symbol": "00700", "categories": ["potential", "risk", "anomaly"]},
+    {"market": "cn", "symbol": "601619", "categories": ["potential", "risk", "anomaly"]},
+    {"market": "crypto", "symbol": "USDT", "categories": ["risk", "anomaly"]}
+  ],
+  "refresh_seconds": 15,
+  "forecast_alert_pct": 0.7,
+  "price_change_alert_pct": 2.0,
+  "volume_ratio_alert": 1.8
+}

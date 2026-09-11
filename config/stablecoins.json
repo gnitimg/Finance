@@ -1,0 +1,71 @@
+{
+  "USDT": {
+    "coingecko_id": "tether",
+    "chain": "ethereum",
+    "contract": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+    "defillama_id": "1",
+    "counter_assets": ["USDC", "DAI", "WETH", "WBTC"]
+  },
+  "USDC": {
+    "coingecko_id": "usd-coin",
+    "chain": "ethereum",
+    "contract": "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "defillama_id": "2",
+    "counter_assets": ["USDT", "DAI", "WETH", "WBTC"]
+  },
+  "DAI": {
+    "coingecko_id": "dai",
+    "chain": "ethereum",
+    "contract": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+    "defillama_id": "5",
+    "counter_assets": ["USDC", "USDT", "WETH", "WBTC"]
+  },
+  "USDE": {
+    "coingecko_id": "ethena-usde"
+  },
+  "FDUSD": {
+    "coingecko_id": "first-digital-usd"
+  },
+  "TUSD": {
+    "coingecko_id": "true-usd"
+  },
+  "PYUSD": {
+    "coingecko_id": "paypal-usd"
+  },
+  "USDD": {
+    "coingecko_id": "usdd"
+  },
+  "FRAX": {
+    "coingecko_id": "frax"
+  },
+  "GHO": {
+    "coingecko_id": "gho"
+  },
+  "LUSD": {
+    "coingecko_id": "liquity-usd"
+  },
+  "CRVUSD": {
+    "coingecko_id": "crvusd"
+  },
+  "USDS": {
+    "coingecko_id": "usds"
+  },
+  "USDP": {
+    "coingecko_id": "paxos-standard"
+  },
+  "GUSD": {
+    "coingecko_id": "gemini-dollar"
+  },
+  "SUSD": {
+    "coingecko_id": "nusd"
+  },
+  "USD1": {
+    "coingecko_id": "usd1-wlfi"
+  },
+  "RLUSD": {
+    "coingecko_id": "ripple-usd"
+  },
+  "USDG": {
+    "coingecko_id": "global-dollar"
+  }
+}
