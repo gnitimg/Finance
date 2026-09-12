@@ -19,4 +19,6 @@ Supported chart pairs are `1d/5m`, `5d/15m`, `5d/30m`, `1mo/1d`, `3mo/1d`, `6mo/
 
 `off` prevents specialist use. `auto` permits it only for an explicit L2 request. `force` is for an already deep L1/L2 request and still runs Python first. Public web deployment sets specialist use to off.
 
+`train` bulk-fits the model for up to twelve repeated `--asset` values and reports the honest per-asset evaluation (skill, directional accuracy, phase, confidence, publishable).
+
 `monitor` accepts at most eight repeated `--asset` values. It returns potential, risk, and anomaly matches plus stable alert IDs. Thresholds are percentages for forward/price movement and a multiple for relative volume; no LLM is called.

@@ -16,6 +16,10 @@ FEATURE_NAMES = [
 ]
 STATE_VERSION = 6
 MIN_SAMPLES = 15
+# Recency bounds keep the kNN analogue and the per-step path fits affordable
+# on long training contexts without changing their short-memory character.
+ANALOGUE_POOL = 500
+PATH_FIT_WINDOW = 800
 INTERVAL_MINUTES = {"1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "90m": 90}
 MARKET_SESSIONS = {
     "cn": ("Asia/Shanghai", ((570, 690), (780, 900))),
@@ -199,6 +203,7 @@ def _trend_return(features: list[float], horizon: int, profile: str) -> float:
 def _analogue_return(reference: list[dict], features: list[float], means: list[float], scales: list[float]) -> float | None:
     if len(reference) < 12:
         return None
+    reference = reference[-ANALOGUE_POOL:]
     target = _vector(features, means, scales)[1:]
     ranked = []
     total = len(reference)
@@ -393,6 +398,7 @@ def _return_cap(bars: list[dict], horizon: int) -> float:
 
 
 def _direct_return(bars: list[dict], horizon: int, profile: str = "market") -> float | None:
+    bars = bars[-(PATH_FIT_WINDOW + horizon + 40):]
     samples = build_samples(bars, horizon)
     latest = _features(bars, len(bars) - 1)
     if len(samples) < MIN_SAMPLES or latest is None:
@@ -550,7 +556,9 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
     # Keep holdout calibration quality distinct from whether a live forecast may
     # be published. Lagging forecasts can score well historically, but are still
     # damped and withheld from alerts below.
+    capped_by_validation = False
     if not validation_passed:
+        capped_by_validation = confidence > 34.0
         confidence = min(confidence, 34.0)
     grade = "high" if confidence >= 70 else "medium" if confidence >= 48 else "low"
     latest_features = _features(bars, len(bars) - 1)
@@ -584,7 +592,7 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
         "calibration_horizon_label": _horizon_label(interval, horizon),
         "training": {"initial_samples": len(train), "base_samples": state.get("base_samples", len(train)), "evaluation_samples": len(validation), "online_updates": state["updates"], "last_matured_at": state.get("last_matured_at"), "refresh_trigger": "each newly observed bar"},
         "evaluation": {"mean_absolute_error_pct": mae, "directional_accuracy": directional * 100, "no_change_error_pct": naive_mae, "skill_vs_no_change_pct": skill_vs_naive, "phase_lag_bars": phase_lag, "validation_passed": validation_passed, "samples": len(validation)},
-        "confidence": {"score": confidence, "grade": grade, "kind": "historical_calibration_quality", "not_probability": True, "basis": ["chronological holdout error", "directional accuracy", "matured sample count"]},
+        "confidence": {"score": confidence, "grade": grade, "kind": "historical_calibration_quality", "not_probability": True, "capped_by_validation": capped_by_validation, "basis": ["chronological holdout error", "directional accuracy", "matured sample count"]},
         "series": {"predicted": _free_running_series(predictions[-60:], horizon), "one_shot_predicted": predictions[-60:], "actual": actual[-60:]},
         "forward_series": forward_series,
         "next_forecast": {"origin_time": bars[-1]["time"], "origin_price": latest_price, "target_time": terminal["time"], "predicted_price": terminal["value"], "predicted_return_pct": terminal_return_pct, "lower_price": terminal.get("lower"), "upper_price": terminal.get("upper"), "horizon_bars": terminal["step"], "horizon_label": display_horizon_label, "publishable": publishable, "publication_damping": publication_damping, "components": next_components},

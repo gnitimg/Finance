@@ -86,7 +86,9 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
     ml_history = display_history
     ml_context = {"range": range_name, "interval": interval, "bars": len(display_history), "extended": False}
     if use_ml:
-        context = ("5d", "5m") if interval == "5m" and range_name == "1d" else (("1y", "1d") if market == "crypto" else ("2y", "1d")) if interval == "1d" and range_name not in {"1y", "2y"} else None
+        # Intraday keeps the fast 5-day context so monitor scans stay quick; deep
+        # intraday training is available on demand via `train --range 1mo`.
+        context = ("5d", "5m") if interval == "5m" and range_name == "1d" else (("1y", "1d") if market == "crypto" else ("5y", "1d")) if interval == "1d" else None
         if context and context != (range_name, interval):
             try:
                 context_data = history(market, symbol, context[0], context[1])
@@ -188,6 +190,57 @@ def monitor_assets(assets: list[str] | None = None, forecast_pct: float = 0.7, p
         result["errors"].append({"code": "NO_MONITOR_DATA", "message": "No monitored asset returned usable data"})
     result["timing"]["total_ms"] = round((time.perf_counter() - started) * 1000, 2)
     result["routing"] = {"level": "L1", "specialist_requested": False, "specialist_used": False, "reason": "deterministic_watchlist_monitor", "specialist_model": None}
+    return result
+
+
+def train_models(assets: list[str], range_name: str = "3mo", interval: str = "1d") -> dict:
+    started = time.perf_counter()
+    result = envelope("train")
+    normalized = []
+    seen = set()
+    for item in assets[:12]:
+        market, symbol = item.split(":", 1) if ":" in item else ("auto", item)
+        pair = normalize(market, symbol)
+        if pair not in seen:
+            seen.add(pair)
+            normalized.append(pair)
+    if not normalized:
+        raise ValueError("train requires at least one asset")
+    completed = {}
+    failures = []
+
+    def fit(index: int, market: str, symbol: str):
+        analysis = analyze_asset(market, symbol, range_name, interval)
+        data = analysis["data"]
+        forecast_data = data.get("ml_forecast") or {}
+        return index, {
+            "asset": data.get("asset"),
+            "status": forecast_data.get("status"),
+            "horizon_label": forecast_data.get("horizon_label"),
+            "profile": (forecast_data.get("ensemble") or {}).get("profile"),
+            "training": forecast_data.get("training"),
+            "evaluation": forecast_data.get("evaluation"),
+            "confidence": forecast_data.get("confidence"),
+            "publishable": (forecast_data.get("next_forecast") or {}).get("publishable"),
+            "state_scope": f"{market}:{symbol}:{interval}",
+        }
+
+    with ThreadPoolExecutor(max_workers=min(4, len(normalized))) as pool:
+        futures = {pool.submit(fit, index, market, symbol): (market, symbol) for index, (market, symbol) in enumerate(normalized)}
+        for future in as_completed(futures):
+            market, symbol = futures[future]
+            try:
+                index, item = future.result()
+                completed[index] = item
+            except Exception as exc:
+                failures.append({"market": market, "symbol": symbol, "message": str(exc)[:180]})
+    items = [completed[index] for index in sorted(completed)]
+    result["data"] = {"interval": interval, "items": items, "failures": failures}
+    result["success"] = bool(items)
+    if not items:
+        result["errors"].append({"code": "NO_TRAIN_DATA", "message": "No asset returned usable training data"})
+    result["timing"]["total_ms"] = round((time.perf_counter() - started) * 1000, 2)
+    result["routing"] = {"level": "L1", "specialist_requested": False, "specialist_used": False, "reason": "deterministic_model_training", "specialist_model": None}
     return result
 
 
@@ -301,6 +354,11 @@ def build_parser() -> argparse.ArgumentParser:
     news_cmd.add_argument("--symbol", required=True)
     news_cmd.add_argument("--limit", type=int, default=12)
     pretty(news_cmd)
+    train_cmd = sub.add_parser("train")
+    train_cmd.add_argument("--asset", action="append", required=True)
+    train_cmd.add_argument("--range", dest="range_name", default="3mo")
+    train_cmd.add_argument("--interval", default="1d")
+    pretty(train_cmd)
     monitor_cmd = sub.add_parser("monitor")
     monitor_cmd.add_argument("--asset", action="append")
     monitor_cmd.add_argument("--forecast-pct", type=float, default=0.7)
@@ -336,6 +394,8 @@ def main() -> int:
             result["routing"] = {"level": "L1", "specialist_requested": False, "specialist_used": False, "reason": "deterministic_news_sentiment", "specialist_model": None}
         elif args.command == "monitor":
             result = monitor_assets(args.asset, args.forecast_pct, args.price_change_pct, args.volume_ratio)
+        elif args.command == "train":
+            result = train_models(args.asset, args.range_name, args.interval)
         else:
             result = health()
     except (FinanceError, ValueError) as exc:

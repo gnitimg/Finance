@@ -8,7 +8,7 @@ const VENV_PYTHON = path.join(ROOT, '.venv', 'bin', 'python')
 const PYTHON = process.env.FINANCE_PYTHON || (fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : 'python3')
 const SCRIPT = path.join(ROOT, 'scripts', 'finance.py')
 const MARKETS = new Set(['auto', 'cn', 'hk', 'us', 'crypto', 'etf', 'fund', 'future', 'metal'])
-const PERIODS = new Set(['1d:5m', '5d:15m', '5d:30m', '1mo:1d', '3mo:1d', '6mo:1d', '1y:1d', '2y:1d'])
+const PERIODS = new Set(['1d:5m', '5d:15m', '5d:30m', '1mo:5m', '1mo:1d', '3mo:1d', '6mo:1d', '1y:1d', '2y:1d', '5y:1d'])
 
 export function validateAsset(market, symbol) {
   const normalizedMarket = String(market || 'auto').toLowerCase()

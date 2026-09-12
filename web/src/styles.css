@@ -210,6 +210,7 @@ main { width: min(1480px, calc(100% - clamp(28px, 6vw, 96px))); margin: 0 auto; 
 .confidence-ring strong, .confidence-ring span { position: relative; z-index: 1; grid-column: auto; }
 .confidence-ring strong { font-size: 21px; }
 .confidence-ring span { color: var(--dim); font-size: 9px; }
+.confidence-ring em { position: absolute; bottom: 14px; z-index: 1; color: var(--amber); font-size: 9px; font-style: normal; letter-spacing: .06em; }
 .model-unavailable { min-height: 118px; margin-top: 26px; padding: 18px; display: flex; flex-direction: column; justify-content: center; border: 1px solid var(--line); background: #121713; }
 .model-unavailable span { color: var(--violet); font-size: 10px; letter-spacing: .08em; }
 .model-unavailable strong { margin-top: 8px; font-family: Georgia, "Songti SC", serif; font-size: 18px; font-weight: 450; }

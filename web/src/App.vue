@@ -727,7 +727,7 @@ onBeforeUnmount(() => {
           <div class="panel-head"><div><span class="section-index">04</span><h3>前瞻模型</h3></div><span class="python-tag">PYTHON / {{ profileLabel(forecast.ensemble?.profile) }}</span></div>
           <div v-if="forecast.next_forecast" class="model-forecast">
             <div><span>预测窗口 · {{ forecast.horizon_label }} · {{ forecastStateLabel() }}</span><strong>{{ currency(forecast.next_forecast.predicted_price) }}</strong><em :class="Number(forecast.next_forecast.predicted_return_pct || 0) >= 0 ? 'positive' : 'negative'">{{ Number(forecast.next_forecast.predicted_return_pct || 0) >= 0 ? '+' : '' }}{{ number(forecast.next_forecast.predicted_return_pct) }}%</em></div>
-            <div class="confidence-ring" :style="{ '--confidence': `${forecast.confidence?.score || 0}%` }"><strong>{{ number(forecast.confidence?.score, 0) }}</strong><span>/100</span></div>
+            <div class="confidence-ring" :title="forecast.confidence?.capped_by_validation ? '未通过样本外验证，分数封顶在 34' : '历史校准质量'" :style="{ '--confidence': `${forecast.confidence?.score || 0}%` }"><strong>{{ number(forecast.confidence?.score, 0) }}</strong><span>/100</span><em v-if="forecast.confidence?.capped_by_validation">封顶</em></div>
           </div>
           <div v-else class="model-unavailable"><span>样本积累中</span><strong>当前数据不足以形成可靠前瞻</strong><p>系统会继续接收实际结果，达到最低校准样本后自动启用。</p></div>
           <div class="model-stats">
