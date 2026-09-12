@@ -91,11 +91,11 @@ const clockSynced = ref(false)
 const toast = reactive({ visible: false, message: '', type: 'error' })
 const settingsSection = ref('timezone')
 const settingsSections = [
-  { id: 'timezone', index: '01', label: '显示时区', hint: '浏览器时区与服务器校时' },
-  { id: 'forecast', index: '02', label: '预测轨迹', hint: '完整滚动前瞻开关' },
-  { id: 'watchlist', index: '03', label: '自选与预警', hint: '标的、类别与阈值' },
-  { id: 'health', index: '04', label: '数据源健康', hint: '行情源状态与降级' },
-  { id: 'about', index: '05', label: '关于', hint: '开源、隐私与免责' },
+  { id: 'timezone', index: '01', label: '显示时区' },
+  { id: 'forecast', index: '02', label: '预测轨迹' },
+  { id: 'watchlist', index: '03', label: '自选与预警' },
+  { id: 'health', index: '04', label: '数据源健康' },
+  { id: 'about', index: '05', label: '关于' },
 ]
 let chart = null
 let stream = null
@@ -574,9 +574,11 @@ async function bootstrap() {
   updateUtcClock()
   clockTimer = window.setInterval(updateUtcClock, 1_000)
   clockSyncTimer = window.setInterval(syncClock, 300_000)
-  await Promise.allSettled([refreshHealth(), syncClock(), loadMonitor({ quiet: false })])
   connectStream()
-  await loadAsset()
+  loadAsset()
+  loadMonitor({ quiet: false })
+  refreshHealth()
+  syncClock()
   quoteTimer = window.setInterval(loadQuote, 3_000)
   selectedTimer = window.setInterval(() => loadAsset({ quiet: true }), 10_000)
   monitorTimer = window.setInterval(() => loadMonitor(), 8_000)
@@ -819,20 +821,19 @@ onBeforeUnmount(() => {
     <div v-if="watchlistOpen" class="modal-layer" role="presentation">
       <section class="watchlist-dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="watchlist-title">
         <header><div><span>FINANCE SETTINGS</span><h2 id="watchlist-title">设置</h2></div><button type="button" aria-label="关闭设置" @click="watchlistOpen = false"><i class="ri-close-line"></i></button></header>
-        <p class="dialog-lead">自选监测、显示时区和数据源状态集中在这里。设置保存在当前浏览器，不会上传个人位置。</p>
         <div class="settings-body">
         <nav class="settings-nav" aria-label="设置目录">
-          <button v-for="entry in settingsSections" :key="entry.id" type="button" :class="{ active: settingsSection === entry.id }" @click="settingsSection = entry.id"><span>{{ entry.index }}</span><div><strong>{{ entry.label }}</strong></div><em>{{ entry.hint }}</em></button>
+          <button v-for="entry in settingsSections" :key="entry.id" type="button" :class="{ active: settingsSection === entry.id }" @click="settingsSection = entry.id"><span>{{ entry.index }}</span><strong>{{ entry.label }}</strong></button>
         </nav>
         <div class="settings-content">
         <section v-show="settingsSection === 'timezone'" class="settings-block timezone-settings">
-          <div class="settings-title"><div><span>01</span><h3>显示时区</h3></div><p>默认读取浏览器时区；时间本身由服务器校准。</p></div>
+          <div class="settings-title"><div><span>01</span><h3>显示时区</h3></div></div>
           <div class="timezone-options">
             <button v-for="option in timeZoneOptions" :key="option.value" type="button" :class="{ active: draftTimeZone === option.value }" @click="draftTimeZone = option.value"><i :class="draftTimeZone === option.value ? 'ri-radio-button-line' : 'ri-checkbox-blank-circle-line'"></i><span>{{ option.label }}</span><em>{{ option.detail }}</em></button>
           </div>
         </section>
         <section v-show="settingsSection === 'forecast'" class="settings-block forecast-settings">
-          <div class="settings-title"><div><span>02</span><h3>预测轨迹</h3></div><p>默认只看当前时点之后；完整模式用于审计历史滚动预测。</p></div>
+          <div class="settings-title"><div><span>02</span><h3>预测轨迹</h3></div></div>
           <label class="setting-switch">
             <div><strong>显示完整预测轨迹</strong><span>在主图加入单次锚定、连续推进的历史滚动前瞻</span></div>
             <input v-model="draftFullForecast" type="checkbox" />
@@ -840,7 +841,7 @@ onBeforeUnmount(() => {
           </label>
         </section>
         <section v-show="settingsSection === 'watchlist'" class="settings-block watchlist-settings">
-          <div class="settings-title"><div><span>03</span><h3>自选与预警</h3></div><p>保存后每 8 秒由 Python 扫描，并在行情条无缝循环状态。</p></div>
+          <div class="settings-title"><div><span>03</span><h3>自选与预警</h3></div></div>
         <div class="watch-add">
           <div class="watch-market-pills" aria-label="新增标的市场">
             <button v-for="option in marketOptions.filter((item) => item.value !== 'auto')" :key="`draft:${option.value}`" type="button" :class="{ active: draftMarket === option.value }" @click="draftMarket = option.value">{{ option.label }}</button>
@@ -871,7 +872,7 @@ onBeforeUnmount(() => {
           <p class="health-note">行情源失败时只会在允许的新鲜度窗口内使用缓存，并明确标记；不会用模型补造实时价格。</p>
         </section>
         <section v-show="settingsSection === 'about'" class="settings-block about-settings">
-          <div class="settings-title"><div><span>05</span><h3>关于</h3></div><p>项目、数据、算法与法律信息集中在这里。</p></div>
+          <div class="settings-title"><div><span>05</span><h3>关于</h3></div></div>
           <div class="about-list">
             <div><span>开源仓库</span><p>本站为 GNITIMG Finance。确定性 Python 引擎、Node 服务端与前端已开源：<a href="https://github.com/gnitimg/Finance" target="_blank" rel="noopener noreferrer">github.com/gnitimg/Finance</a>。</p></div>
             <div><span>信息保护</span><p>行情获取、指标计算、模型训练与告警全部在本站服务器本地完成；不注册、不收集账号、位置或浏览历史。自选列表、时区与已读状态等偏好仅保存在你的浏览器本地。可选的 L2 语言模型综合默认关闭；如启用，仅传输脱敏后的紧凑市场摘要，发送前自动过滤密钥、手机号、账号与频道标识。</p></div>
