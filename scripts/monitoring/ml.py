@@ -14,8 +14,9 @@ FEATURE_NAMES = [
     "close_location", "volume_ratio", "return_5", "ma20_gap", "breakout_10",
     "volume_impulse", "volatility_ratio", "candle_streak", "up_ratio_10",
     "body_pct", "body_dominance", "upper_shadow", "lower_shadow", "gap_open", "inside_bar",
+    "flow_z", "flow_trend_3d",
 ]
-STATE_VERSION = 8
+STATE_VERSION = 9
 MIN_SAMPLES = 15
 # Recency bounds keep the kNN analogue and the per-step path fits affordable
 # on long training contexts without changing their short-memory character.
@@ -31,8 +32,8 @@ MARKET_SESSIONS = {
 }
 MODEL_PROFILES = {
     "market": {"horizon": 3, "ridge": 2.5, "ridge_small": 7.0, "weights": {"ridge": .40, "analogue": .22, "trend": .38}, "velocity": .58, "context_scale": .72, "initial_shrink": .18},
-    "cn_equity": {"horizon": 2, "ridge": 3.0, "ridge_small": 7.5, "weights": {"ridge": .34, "analogue": .20, "trend": .46}, "velocity": .66, "context_scale": .82, "initial_shrink": .16},
-    "hk_equity": {"horizon": 2, "ridge": 2.8, "ridge_small": 7.0, "weights": {"ridge": .36, "analogue": .24, "trend": .40}, "velocity": .62, "context_scale": .78, "initial_shrink": .17},
+    "cn_equity": {"horizon": 1, "ridge": 3.0, "ridge_small": 7.5, "weights": {"ridge": .34, "analogue": .20, "trend": .46}, "velocity": .66, "context_scale": .82, "initial_shrink": .16},
+    "hk_equity": {"horizon": 1, "ridge": 2.8, "ridge_small": 7.0, "weights": {"ridge": .36, "analogue": .24, "trend": .40}, "velocity": .62, "context_scale": .78, "initial_shrink": .17},
     "us_equity": {"horizon": 3, "ridge": 2.5, "ridge_small": 6.5, "weights": {"ridge": .40, "analogue": .24, "trend": .36}, "velocity": .56, "context_scale": .76, "initial_shrink": .18},
     "etf": {"horizon": 3, "ridge": 3.2, "ridge_small": 7.5, "weights": {"ridge": .42, "analogue": .30, "trend": .28}, "velocity": .42, "context_scale": .58, "initial_shrink": .16},
     "fund": {"horizon": 2, "ridge": 4.5, "ridge_small": 9.0, "weights": {"ridge": .50, "analogue": .34, "trend": .16}, "velocity": .28, "context_scale": .42, "initial_shrink": .12},
@@ -70,7 +71,7 @@ def _horizon_label(interval: str, horizon: int) -> str:
     return f"{horizon} 个 BAR"
 
 
-def _features(bars: list[dict], index: int) -> list[float] | None:
+def _features(bars: list[dict], index: int, flow_value: tuple[float, float] | None = None) -> list[float] | None:
     if index < 20:
         return None
     closes = [float(bars[i]["close"]) for i in range(index - 20, index + 1)]
@@ -137,13 +138,15 @@ def _features(bars: list[dict], index: int) -> list[float] | None:
         (min(bar_open, price) - bar_low) / price,
         bar_open / previous_close - 1 if previous_close else 0.0,
         1.0 if bar_high <= bars[index - 1].get("high", bar_high) and bar_low >= bars[index - 1].get("low", bar_low) else 0.0,
+        flow_value[0] if flow_value else 0.0,
+        flow_value[1] if flow_value else 0.0,
     ]
 
 
-def build_samples(bars: list[dict], horizon: int = 3) -> list[dict]:
+def build_samples(bars: list[dict], horizon: int = 3, flow_by_index: list | None = None) -> list[dict]:
     samples = []
     for index in range(20, len(bars) - horizon):
-        features = _features(bars, index)
+        features = _features(bars, index, flow_by_index[index] if flow_by_index else None)
         origin = float(bars[index]["close"])
         target = float(bars[index + horizon]["close"])
         if features is None or origin <= 0 or target <= 0:
@@ -157,6 +160,35 @@ def build_samples(bars: list[dict], horizon: int = 3) -> list[dict]:
             "target_time": bars[index + horizon]["time"],
         })
     return samples
+
+
+def flow_series_by_index(dates: list[str], flow: list[dict] | None) -> list[tuple[float, float]]:
+    """Per-bar (flow z-score, 3-day trend) from daily main-force net flow rows.
+
+    Each bar only sees flow rows dated on or before it, so the mapping stays
+    causal. Bars before the first flow row get the neutral (0, 0).
+    """
+    if not flow:
+        return [(0.0, 0.0)] * len(dates)
+    mains = [float(row["main_net"]) for row in flow]
+    flow_dates = [str(row["date"]) for row in flow]
+    features = []
+    pointer = 0
+    for bar_date in dates:
+        while pointer + 1 < len(flow_dates) and flow_dates[pointer + 1] <= bar_date:
+            pointer += 1
+        if flow_dates[pointer] > bar_date:
+            features.append((0.0, 0.0))
+            continue
+        window = mains[max(0, pointer - 59):pointer + 1]
+        mean = sum(window) / len(window)
+        variance = sum((value - mean) ** 2 for value in window) / max(1, len(window) - 1)
+        std = max(math.sqrt(variance), 1.0)
+        z = (mains[pointer] - mean) / std
+        trend_window = mains[max(0, pointer - 2):pointer + 1]
+        trend = sum(trend_window) / (std * math.sqrt(len(trend_window)))
+        features.append((z, trend))
+    return features
 
 
 def _solve(matrix: list[list[float]], vector: list[float]) -> list[float]:
@@ -298,7 +330,21 @@ def _live_context_return(live_context: dict | None, features: list[float], horiz
     change = float(metrics.get("change_pct") or 0)
     abnormal_direction = 1.0 if change > 0 else -1.0 if change < 0 else 0.0
     abnormal_signal = abnormal_direction * max(0.0, min(1.0, float(abnormal.get("score") or 0) / 100))
-    evidence_signal = 0.78 * score + 0.22 * abnormal_signal
+    flow = context.get("flow") or {}
+    book = context.get("book") or {}
+    flow_raw = flow.get("zscore")
+    flow_signal = max(-1.0, min(1.0, float(flow_raw) / 3.0)) if flow_raw is not None else None
+    book_raw = book.get("imbalance")
+    book_signal = max(-1.0, min(1.0, float(book_raw))) if book_raw is not None else None
+    # Present-only weighted blend, so a market without order-book or flow
+    # coverage falls back to the sentiment/abnormal pair.
+    terms = [(score, 0.62), (abnormal_signal, 0.18)]
+    if flow_signal is not None:
+        terms.append((flow_signal, 0.12))
+    if book_signal is not None:
+        terms.append((book_signal, 0.08))
+    weight_sum = sum(weight for _value, weight in terms)
+    evidence_signal = sum(value * weight for value, weight in terms) / weight_sum
     volatility = max(abs(features[9]), abs(features[0]) * .65, .00035)
     config = MODEL_PROFILES.get(profile, MODEL_PROFILES["market"])
     coverage = .25 + .75 * confidence
@@ -307,8 +353,10 @@ def _live_context_return(live_context: dict | None, features: list[float], horiz
     estimate = max(-cap, min(cap, estimate))
     return estimate, {
         "score": round(score * 100, 2), "confidence": round(confidence * 100, 2),
+        "flow_signal": None if flow_signal is None else round(flow_signal, 4),
+        "book_signal": None if book_signal is None else round(book_signal, 4),
         "return_contribution_pct": round((math.exp(estimate) - 1) * 100, 5),
-        "method": "price_volume_technical_related_content",
+        "method": "price_volume_technical_related_content_flow_orderbook",
     }
 
 
@@ -470,8 +518,14 @@ def _forward_path(bars: list[dict], times: list[str], base_horizon: int, base_re
     return result
 
 
-def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", horizon: int = 3, to_session_close: bool = False, asset_type: str | None = None, live_context: dict | None = None) -> dict:
-    samples = build_samples(bars, horizon)
+def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", horizon: int = 3, to_session_close: bool = False, asset_type: str | None = None, live_context: dict | None = None, flow: list[dict] | None = None) -> dict:
+    # Flow rows are daily; they become training features only for daily bars
+    # where the row is complete at the bar's close. Intraday models see today's
+    # running flow through the live context instead.
+    flow_by_index = None
+    if flow and interval == "1d":
+        flow_by_index = flow_series_by_index([str(bar.get("time", ""))[:10] for bar in bars], flow)
+    samples = build_samples(bars, horizon, flow_by_index)
     if len(samples) < MIN_SAMPLES:
         return {"status": "insufficient_data", "required_samples": MIN_SAMPLES, "available_samples": len(samples), "series": {"predicted": [], "actual": []}}
     # Train on the earlier 60% and walk the most recent 40% chronologically;
@@ -604,7 +658,7 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
         capped_by_validation = confidence > 34.0
         confidence = min(confidence, 34.0)
     grade = "high" if confidence >= 70 else "medium" if confidence >= 48 else "low"
-    latest_features = _features(bars, len(bars) - 1)
+    latest_features = _features(bars, len(bars) - 1, flow_by_index[-1] if flow_by_index else None)
     if latest_features:
         ridge_return = _predict(weights, _vector(latest_features, means, scales))
         analogue_return = _analogue_return(samples, latest_features, means, scales)

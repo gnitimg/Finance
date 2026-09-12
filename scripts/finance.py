@@ -21,10 +21,12 @@ from scripts.analyzers.technical import analyze as technical_analysis
 from scripts.cache import CACHE
 from scripts.config import load_dotenv, read_json
 from scripts.models import FinanceError, clean_json, utc_now
-from scripts.monitoring.ml import adaptive_horizon, forecast
+from scripts.monitoring.ml import adaptive_horizon, flow_series_by_index, forecast
 from scripts.monitoring.scanner import scan as monitor_scan
 from scripts.news.service import get_news
+from scripts.providers.eastmoney import daily_flow
 from scripts.providers.service import history, quote
+from scripts.providers.tencent import order_book_cn
 from scripts.routing import classify
 from scripts.specialist.client import analyze as specialist_analyze
 from scripts.symbols import STABLECOINS, normalize
@@ -114,7 +116,22 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
     asset_type = (market_data.get("asset") or {}).get("type")
     to_session_close = range_name == "1d" and interval == "5m" and market in {"cn", "hk", "us", "etf", "fund"}
     horizon = adaptive_horizon(market, symbol, interval, asset_type)
-    ml = forecast(ml_history, market, symbol, interval, horizon, to_session_close=to_session_close, asset_type=asset_type, live_context=market_sentiment) if use_ml else {"status": "disabled", "series": {"predicted": [], "actual": []}}
+    live_context = market_sentiment
+    flow = None
+    if use_ml and market in {"cn", "hk", "us"}:
+        try:
+            flow, _flow_meta = daily_flow(market, symbol)
+            live_signal = flow_series_by_index([flow[-1]["date"]], flow)[-1]
+            live_context = {**market_sentiment, "flow": {"zscore": live_signal[0], "trend_3d": live_signal[1]}}
+        except FinanceError as exc:
+            result["warnings"].append(f"Fund-flow features unavailable: {exc.message}")
+        if market == "cn":
+            try:
+                book = order_book_cn(symbol)
+                live_context = {**live_context, "book": {"imbalance": book["imbalance"], "active_buy_ratio": book["active_buy_ratio"]}}
+            except FinanceError as exc:
+                result["warnings"].append(f"Order-book signal unavailable: {exc.message}")
+    ml = forecast(ml_history, market, symbol, interval, horizon, to_session_close=to_session_close, asset_type=asset_type, live_context=live_context, flow=flow) if use_ml else {"status": "disabled", "series": {"predicted": [], "actual": []}}
     ml["context"] = ml_context
     position = analyze_position(float(market_data["quote"]["price"]), shares, cost)
     result["data"] = {**market_data, "technical": technical, "market_sentiment": market_sentiment, "ml_forecast": ml, "position": position}

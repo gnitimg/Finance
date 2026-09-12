@@ -1,12 +1,42 @@
 from __future__ import annotations
 
+import http.client
 import json
+import shutil
 import socket
+import subprocess
 import time
 import urllib.error
 import urllib.request
 
 from .models import FinanceError
+
+
+def _curl_request(url: str, *, headers: dict | None = None, timeout: float = 10) -> tuple[bytes, dict]:
+    """Fallback transport for hosts that drop Python's HTTP client (TLS fingerprinting)."""
+    executable = shutil.which("curl")
+    if not executable:
+        raise FinanceError("NETWORK_ERROR", "curl fallback unavailable")
+    command = [executable, "-sS", "-L", "--compressed", "--max-time", str(int(max(timeout, 1)) + 2), "-w", "\n%{http_code}"]
+    merged = {"User-Agent": "gnitimg-finance/1.0 (+https://finance.gnitimg.ac.cn)"}
+    merged.update(headers or {})
+    for name, value in merged.items():
+        command += ["-H", f"{name}: {value}"]
+    command.append(url)
+    try:
+        completed = subprocess.run(command, capture_output=True, timeout=timeout + 4)
+    except subprocess.TimeoutExpired as exc:
+        raise FinanceError("NETWORK_ERROR", "curl fallback timed out") from exc
+    stdout = completed.stdout
+    split = stdout.rfind(b"\n")
+    body, status_text = stdout[:split], stdout[split + 1 :].strip()
+    if completed.returncode != 0 or not status_text.isdigit():
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()[:140]
+        raise FinanceError("NETWORK_ERROR", f"curl fallback failed: {detail}")
+    status = int(status_text)
+    if status >= 400:
+        raise FinanceError("HTTP_ERROR", f"upstream returned HTTP {status}")
+    return body, {"status": status, "content_type": None, "elapsed_ms": None, "transport": "curl"}
 
 
 def request_bytes(url: str, *, headers: dict | None = None, timeout: float = 10, attempts: int = 2) -> tuple[bytes, dict]:
@@ -26,12 +56,19 @@ def request_bytes(url: str, *, headers: dict | None = None, timeout: float = 10,
                 break
             retry_after = exc.headers.get("Retry-After") if exc.headers else None
             time.sleep(min(float(retry_after or 0.5 * (2 ** attempt)), 3.0))
-        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, socket.timeout, ConnectionError) as exc:
             final_error = exc
             if attempt + 1 < attempts:
                 time.sleep(0.35 * (2 ** attempt))
     if isinstance(final_error, urllib.error.HTTPError):
         raise FinanceError("HTTP_ERROR", f"upstream returned HTTP {final_error.code}")
+    if isinstance(final_error, (urllib.error.URLError, http.client.HTTPException, TimeoutError, socket.timeout, ConnectionError)):
+        # Hosts that fingerprint TLS drop urllib before any HTTP status exists;
+        # give the system curl a single chance before giving up.
+        try:
+            return _curl_request(url, headers=headers, timeout=timeout)
+        except FinanceError:
+            pass
     raise FinanceError("NETWORK_ERROR", str(final_error or "request failed"))
 
 

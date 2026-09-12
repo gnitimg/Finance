@@ -73,8 +73,8 @@ class MLTests(unittest.TestCase):
         self.assertEqual(afternoon_times[-1], "2026-09-11T07:00:00Z")
 
     def test_market_specific_horizons_are_more_responsive(self):
-        self.assertEqual(ml.adaptive_horizon("cn", "601619", "5m"), 2)
-        self.assertEqual(ml.adaptive_horizon("hk", "00700", "1d"), 2)
+        self.assertEqual(ml.adaptive_horizon("cn", "601619", "5m"), 1)
+        self.assertEqual(ml.adaptive_horizon("hk", "00700", "1d"), 1)
         self.assertEqual(ml.adaptive_horizon("us", "NVDA", "5m"), 3)
         self.assertEqual(ml.adaptive_horizon("crypto", "USDT", "1d"), 1)
         self.assertEqual(ml.adaptive_horizon("crypto", "USDT", "5m"), 5)
@@ -112,7 +112,7 @@ class MLTests(unittest.TestCase):
         negative, _ = ml._live_context_return({"score": -65, "confidence": 80, "metrics": {"change_pct": -2}, "abnormal": {"score": 55}}, features, 3, "us_equity")
         self.assertGreater(positive, 0)
         self.assertLess(negative, 0)
-        self.assertEqual(metadata["method"], "price_volume_technical_related_content")
+        self.assertEqual(metadata["method"], "price_volume_technical_related_content_flow_orderbook")
 
     def test_model_refits_when_training_context_grows_materially(self):
         with tempfile.TemporaryDirectory() as directory:
