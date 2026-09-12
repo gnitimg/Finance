@@ -126,7 +126,7 @@ regime 冲突: 只压幅(50%→8%), 不改方向
 | 存贷双高 | 同上 | MONETARYFUNDS、INTEREST_DEBT_RATIO | 货币资金 ≥30% 且 带息负债率 ≥20% → detected |
 | 财务困境 | 同上 | TOTAL_LIABILITIES、TOTAL_ASSETS | 资不抵债(负债率 ≥100%) → detected |
 | 财务分析 | 同上 | 最新报告期标记 | 覆盖标记(covered),无命中态 |
-| 股东减持 | `RPT_EXECUTIVE_HOLD_CHANGE` | CHANGE_NUM、CHANGE_REASON、CHANGE_DATE | 近 180 天存在负变动或含"减持" → detected(口径:董监高;大股东层级二期);排序字段是 CHANGE_DATE 而非 REPORT_DATE |
+| 股东减持 | `RPT_EXECUTIVE_HOLD_CHANGE` + **巨潮公告检索** | 董监高:CHANGE_NUM/CHANGE_REASON;巨潮:公告标题+日期 | 双通道:董监高近 180 天负变动 → detected;巨潮"减持"相关公告(计划/实施/届满)→ detected 并给出最近公告标题与日期(实测比三方行情 App 的状态更新)。注意:巨潮必须带自家 Referer(带东财 Referer 会被拒),中文表单需 URL 编码,seDate 必须显式起止 |
 
 ### 状态机(结构化数据接入后)
 

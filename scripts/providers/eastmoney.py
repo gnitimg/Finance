@@ -6,7 +6,7 @@ import re
 import time
 
 from ..cache import CACHE
-from ..http_client import request_json
+from ..http_client import request_json, request_post_json
 from ..models import FinanceError, utc_now
 
 # East Money's public fund-flow feed. The push2his daykline endpoint keeps the
@@ -360,7 +360,7 @@ def _financial_findings(secucode: str) -> dict:
     return findings
 
 
-def _executive_findings(market: str, symbol: str, secucode: str) -> dict:
+def _executive_findings(market: str, symbol: str, secucode: str, entity: str | None = None) -> dict:
     findings = {}
     try:
         rows = _f10_report("RPT_EXECUTIVE_HOLD_CHANGE", secucode, "CHANGE_DATE")
@@ -388,6 +388,24 @@ def _executive_findings(market: str, symbol: str, secucode: str) -> dict:
         }
     elif rows:
         findings["shareholder_reduction"] = {"detected": False, "detail": "近 180 天无董监高减持记录"}
+    if entity:
+        # Controlling and 5%+ shareholder plans are announced through cninfo;
+        # the executive-change report cannot see that tier.
+        try:
+            announcements = cninfo_reduction_announcements(symbol, entity)
+        except Exception:
+            announcements = []
+        if announcements:
+            latest = announcements[0]
+            detected = "计划" in latest["title"]
+            existing = findings.get("shareholder_reduction") or {}
+            if detected or not existing:
+                findings["shareholder_reduction"] = {
+                    "detected": True,
+                    "detail": f"最近减持公告：{latest['title']}（{latest['date']}）" + (f"；{existing.get('detail')}" if existing.get("detail") else ""),
+                }
+            elif existing.get("detail"):
+                findings["shareholder_reduction"]["detail"] += f"；公告线索：{latest['title']}（{latest['date']}）"
     return findings
 
 
@@ -515,7 +533,7 @@ def risk_reports(market: str, symbol: str, security_name: str | None = None) -> 
     except Exception:
         pass
     findings.update(_financial_findings(secucode))
-    findings.update(_executive_findings(market, symbol, secucode))
+    findings.update(_executive_findings(market, symbol, secucode, entity=security_name))
     name = (security_name or "").strip()
     if name:
         # The exchange name alone settles this category in both directions,
@@ -536,3 +554,51 @@ def cached_risk_reports(market: str, symbol: str, security_name: str | None = No
         return None
     cached, _meta = CACHE.get(f"riskreports:{symbol}", max_age)
     return cached if isinstance(cached, dict) else None
+
+
+_CNINFO_SEARCH_URL = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
+_CNINFO_ORG_URL = "http://www.cninfo.com.cn/new/information/topSearch/query"
+_CNINFO_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36", "Referer": "http://www.cninfo.com.cn/"}
+
+
+def cninfo_org_id(keyword: str) -> str | None:
+    cache_key = f"cninfo:org:{keyword}"
+    cached, _meta = CACHE.get(cache_key, 604_800)
+    if cached:
+        return cached
+    payload, _meta = request_post_json(_CNINFO_ORG_URL, {"keyWord": keyword, "maxNum": "10"}, headers=_CNINFO_HEADERS, timeout=10)
+    match = next((item for item in payload if item.get("code") == keyword), None) if isinstance(payload, list) else None
+    org = (match or {}).get("orgId")
+    if org:
+        CACHE.set(cache_key, org)
+    return org
+
+
+def cninfo_reduction_announcements(symbol: str, keyword: str, days: int = 180) -> list[dict]:
+    """Official cninfo announcements mentioning reduction for this stock.
+
+    This is the only keyless channel that reaches the controlling/shareholder
+    tier the executive-change report cannot see, and it is independent of the
+    East Money hosts entirely.
+    """
+    org = cninfo_org_id(keyword) or ""
+    today = datetime.now(timezone.utc).date().isoformat()
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    payload, _meta = request_post_json(
+        _CNINFO_SEARCH_URL,
+        {
+            "pageNum": "1", "pageSize": "15", "column": "sse", "tabName": "fulltext",
+            "stock": f"{symbol},{org}", "searchkey": "减持",
+            "seDate": f"{since}~{today}", "sortName": "time", "sortType": "desc", "isHLtitle": "true",
+        },
+        headers=_CNINFO_HEADERS, timeout=12,
+    )
+    announcements = payload.get("announcements") if isinstance(payload, dict) else None
+    result = []
+    for item in announcements or []:
+        title = str(item.get("announcementTitle") or "").replace("<em>", "").replace("</em>", "").strip()
+        stamp = item.get("announcementTime")
+        date = datetime.fromtimestamp(stamp / 1000, tz=timezone.utc).date().isoformat() if stamp else None
+        if title and date:
+            result.append({"title": title, "date": date, "url": f"http://static.cninfo.com.cn/{item.get('adjunctUrl', '')}"})
+    return result
