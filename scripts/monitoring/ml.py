@@ -13,8 +13,9 @@ FEATURE_NAMES = [
     "ma10_gap", "momentum_5", "trend_5", "volatility_5", "range_pct",
     "close_location", "volume_ratio", "return_5", "ma20_gap", "breakout_10",
     "volume_impulse", "volatility_ratio", "candle_streak", "up_ratio_10",
+    "body_pct", "body_dominance", "upper_shadow", "lower_shadow", "gap_open", "inside_bar",
 ]
-STATE_VERSION = 7
+STATE_VERSION = 8
 MIN_SAMPLES = 15
 # Recency bounds keep the kNN analogue and the per-step path fits affordable
 # on long training contexts without changing their short-memory character.
@@ -92,6 +93,13 @@ def _features(bars: list[dict], index: int) -> list[float] | None:
     long_variance = sum((item - long_mean) ** 2 for item in long_returns) / len(long_returns)
     recent_range = max(closes[-10:]) - min(closes[-10:])
     volume_ratio = volumes[-1] / mean_volume - 1 if mean_volume else 0.0
+    latest = bars[index]
+    bar_open = float(latest.get("open") or price)
+    bar_high = float(latest.get("high") or price)
+    bar_low = float(latest.get("low") or price)
+    body = price - bar_open
+    span = max(bar_high - bar_low, 1e-9)
+    previous_close = closes[-2]
     up_flags = [1.0 if closes[i] > closes[i - 1] else -1.0 if closes[i] < closes[i - 1] else 0.0 for i in range(1, len(closes))]
     candle_streak = 0.0
     for flag in reversed(up_flags):
@@ -123,6 +131,12 @@ def _features(bars: list[dict], index: int) -> list[float] | None:
         math.sqrt(variance) / max(math.sqrt(long_variance), 1e-8),
         candle_streak,
         up_ratio_10,
+        body / price,
+        abs(body) / span,
+        (bar_high - max(bar_open, price)) / price,
+        (min(bar_open, price) - bar_low) / price,
+        bar_open / previous_close - 1 if previous_close else 0.0,
+        1.0 if bar_high <= bars[index - 1].get("high", bar_high) and bar_low >= bars[index - 1].get("low", bar_low) else 0.0,
     ]
 
 
@@ -460,7 +474,9 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
     samples = build_samples(bars, horizon)
     if len(samples) < MIN_SAMPLES:
         return {"status": "insufficient_data", "required_samples": MIN_SAMPLES, "available_samples": len(samples), "series": {"predicted": [], "actual": []}}
-    split = min(len(samples) - 4, max(10, int(len(samples) * 0.72)))
+    # Train on the earlier 60% and walk the most recent 40% chronologically;
+    # three consecutive windows report whether skill is stable or regime-lucky.
+    split = min(len(samples) - 4, max(10, int(len(samples) * 0.6)))
     train, validation = samples[:split], samples[split:]
     model_dir = DATA_DIR / "models"
     model_dir.mkdir(exist_ok=True)
@@ -556,6 +572,21 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
     directional = sum(evaluation_directions) / len(evaluation_directions)
     naive_mae = sum(naive_errors) / len(naive_errors)
     skill_vs_naive = (naive_mae - mae) / naive_mae * 100 if naive_mae > 1e-9 else 0.0
+    windows = []
+    window_size = max(1, len(validation) // 3)
+    for w in range(3):
+        lo = w * window_size
+        hi = (w + 1) * window_size if w < 2 else len(validation)
+        if lo >= hi:
+            continue
+        w_mae = sum(evaluation_errors[lo:hi]) / (hi - lo)
+        w_naive = sum(naive_errors[lo:hi]) / (hi - lo)
+        windows.append({
+            "samples": hi - lo,
+            "mean_absolute_error_pct": w_mae,
+            "directional_accuracy": sum(evaluation_directions[lo:hi]) / (hi - lo) * 100,
+            "skill_vs_no_change_pct": (w_naive - w_mae) / w_naive * 100 if w_naive > 1e-9 else 0.0,
+        })
     phase_lag = _phase_lag(predicted_returns, actual_returns)
     validation_passed = skill_vs_naive > 0 and directional >= 0.5
     publishable = validation_passed and (phase_lag is None or phase_lag >= 0)
@@ -603,7 +634,7 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
         "calibration_horizon_bars": horizon,
         "calibration_horizon_label": _horizon_label(interval, horizon),
         "training": {"initial_samples": len(train), "base_samples": state.get("base_samples", len(train)), "evaluation_samples": len(validation), "online_updates": state["updates"], "last_matured_at": state.get("last_matured_at"), "refresh_trigger": "each newly observed bar"},
-        "evaluation": {"mean_absolute_error_pct": mae, "directional_accuracy": directional * 100, "no_change_error_pct": naive_mae, "skill_vs_no_change_pct": skill_vs_naive, "phase_lag_bars": phase_lag, "validation_passed": validation_passed, "samples": len(validation)},
+        "evaluation": {"mean_absolute_error_pct": mae, "directional_accuracy": directional * 100, "no_change_error_pct": naive_mae, "skill_vs_no_change_pct": skill_vs_naive, "phase_lag_bars": phase_lag, "validation_passed": validation_passed, "samples": len(validation), "windows": windows},
         "confidence": {"score": confidence, "grade": grade, "kind": "historical_calibration_quality", "not_probability": True, "capped_by_validation": capped_by_validation, "basis": ["chronological holdout error", "directional accuracy", "matured sample count"]},
         "series": {"predicted": _free_running_series(predictions[-60:], horizon), "one_shot_predicted": predictions[-60:], "actual": actual[-60:]},
         "forward_series": forward_series,
