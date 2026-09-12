@@ -136,6 +136,11 @@ const detectedRisks = computed(() => companyRisk.value.detected || [])
 const riskSources = computed(() => (companyRisk.value.sources || []).map((item) => item.name).filter(Boolean).join(' / '))
 const backtestStats = ref({ hits: 0, total: 0 })
 const sectorInfo = computed(() => data.value.sector || null)
+const riskStatusRank = { detected: 0, no_evidence: 1, unavailable: 2, source_limited: 3, not_applicable: 4 }
+const sortedRiskCategories = computed(() => {
+  const categories = companyRisk.value?.categories || []
+  return [...categories].sort((left, right) => (riskStatusRank[left.status] ?? 5) - (riskStatusRank[right.status] ?? 5))
+})
 const sectorRows = computed(() => {
   const sector = sectorInfo.value
   if (!sector) return []
@@ -923,7 +928,7 @@ onBeforeUnmount(() => {
             </article>
           </div>
           <div class="risk-matrix" aria-label="风险监测类别及覆盖状态">
-            <div v-for="risk in companyRisk.categories" :key="risk.key" :class="risk.status" :title="risk.description"><span>{{ risk.label }}</span></div>
+            <div v-for="risk in sortedRiskCategories" :key="risk.key" :class="risk.status" :title="risk.description"><span>{{ risk.label }}</span></div>
           </div>
         </section>
         <div v-if="state.news?.items?.length" class="news-list">

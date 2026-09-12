@@ -27,7 +27,7 @@ from scripts.models import FinanceError, clean_json, utc_now
 from scripts.monitoring.ml import adaptive_horizon, flow_series_by_index, forecast
 from scripts.monitoring.scanner import scan as monitor_scan
 from scripts.news.service import cached_news, get_news
-from scripts.providers.eastmoney import cached_daily_flow, cached_market_reference, cached_sector_context, sector_context
+from scripts.providers.eastmoney import cached_daily_flow, cached_market_reference, cached_risk_reports, cached_sector_context, risk_reports, sector_context
 from scripts.providers.service import history, quote
 from scripts.providers.tencent import order_book_cn
 from scripts.routing import classify
@@ -243,6 +243,7 @@ def news_asset(market: str, symbol: str, limit: int = 12) -> dict:
         flow=flow,
         news_providers=news.get("providers_checked"),
         as_of=news.get("generated_at"),
+        structured=risk_reports(market, symbol, security_name=related_name or symbol) or cached_risk_reports(market, symbol),
     )
     if market == "cn":
         try:
@@ -270,6 +271,7 @@ def risk_context_asset(market: str, symbol: str, limit: int = 20) -> dict:
         flow=flow,
         news_providers=news.get("providers_checked"),
         as_of=news.get("generated_at"),
+        structured=risk_reports(market, symbol, security_name=related_name or symbol) or cached_risk_reports(market, symbol),
     )
     return news
 

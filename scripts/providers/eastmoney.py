@@ -369,7 +369,8 @@ def risk_reports(market: str, symbol: str, security_name: str | None = None) -> 
     cached, _meta = CACHE.get(cache_key, 600)
     if cached is not None and isinstance(cached, dict):
         return cached
-    findings: dict = {"sources": ["东方财富数据中心"]}
+    findings: dict = {}
+    result: dict = {"sources": ["东方财富数据中心"], "findings": findings}
     try:
         pledge_rows = _datacenter_report("RPT_CSDC_LIST", secucode, "TRADE_DATE")
         if pledge_rows:
@@ -408,11 +409,17 @@ def risk_reports(market: str, symbol: str, security_name: str | None = None) -> 
                 findings["earnings_risk"] = {"detected": False, "detail": f"业绩预告 {predict_type}（{report_date} 报告期）"}
     except Exception:
         pass
-    name = (security_name or "").upper()
-    if "ST" in name:
-        findings["st_risk"] = {"detected": True, "detail": f"证券简称含风险警示标记（{security_name}）"}
-    CACHE.set(cache_key, findings)
-    return findings
+    name = (security_name or "").strip()
+    if name:
+        # The exchange name alone settles this category in both directions,
+        # so a clean name yields a covered verdict rather than source-limited.
+        flagged = "ST" in name.upper()
+        findings["st_risk"] = {
+            "detected": flagged,
+            "detail": f"证券简称含风险警示标记（{name}）" if flagged else f"证券简称无风险警示标记（{name}）",
+        }
+    CACHE.set(cache_key, result)
+    return result
 
 
 def cached_risk_reports(market: str, symbol: str, security_name: str | None = None, max_age: int = 86_400) -> dict | None:
