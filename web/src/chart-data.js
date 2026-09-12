@@ -21,7 +21,10 @@ export function buildChartData(bars = [], forecast = {}) {
   const actualAxis = cleanBars.map((bar) => bar.time)
   const closes = cleanBars.map((bar) => finiteNumber(bar.close))
   const volumes = cleanBars.map((bar) => finiteNumber(bar.volume) || 0)
-  const historicalMap = new Map((forecast?.series?.predicted || []).map((point) => [point.time, finiteNumber(point.value)]))
+  // Fit view: each point is the model's prediction from its own bar (one-shot),
+  // so the line shows real per-step fit instead of a free-running drift.
+  const historicalSource = forecast?.series?.one_shot_predicted || forecast?.series?.predicted || []
+  const historicalMap = new Map(historicalSource.map((point) => [point.time, finiteNumber(point.value)]))
   const backtest = cleanBars.map((bar) => historicalMap.get(bar.time) ?? null)
   const ma20 = rollingMean(closes, 20)
   const next = forecast?.next_forecast

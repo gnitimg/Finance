@@ -16,7 +16,7 @@ FEATURE_NAMES = [
     "body_pct", "body_dominance", "upper_shadow", "lower_shadow", "gap_open", "inside_bar",
     "flow_z", "flow_trend_3d",
 ]
-STATE_VERSION = 9
+STATE_VERSION = 10
 MIN_SAMPLES = 15
 # Recency bounds keep the kNN analogue and the per-step path fits affordable
 # on long training contexts without changing their short-memory character.
@@ -659,10 +659,12 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
     validation_passed = skill_vs_naive > 0 and directional >= 0.5
     publishable = validation_passed and (phase_lag is None or phase_lag >= 0)
     publication_damping = 1.0 if publishable else 0.35
-    realized_error = state["error_ema"] if state["error_ema"] is not None else mae
     realized_direction = state["direction_ema"] if state["direction_ema"] is not None else directional
     sample_factor = min(1.0, math.log1p(len(validation) + state["updates"]) / math.log(160))
-    quality = max(0.0, min(1.0, 0.62 * realized_direction + 0.38 * max(0.0, 1 - realized_error / 8)))
+    # Credit only skill over the no-change baseline: a naive model also has a
+    # small absolute error, so absolute MAE must not inflate the score.
+    skill_factor = max(0.0, min(1.0, skill_vs_naive / 5.0))
+    quality = max(0.0, min(1.0, 0.55 * realized_direction + 0.45 * skill_factor))
     confidence = round(min(85.0, 100 * sample_factor * quality), 2)
     # Keep holdout calibration quality distinct from whether a live forecast may
     # be published. Lagging forecasts can score well historically, but are still
@@ -703,7 +705,7 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
         "calibration_horizon_label": _horizon_label(interval, horizon),
         "training": {"initial_samples": len(train), "base_samples": state.get("base_samples", len(train)), "evaluation_samples": len(validation), "online_updates": state["updates"], "last_matured_at": state.get("last_matured_at"), "refresh_trigger": "each newly observed bar"},
         "evaluation": {"mean_absolute_error_pct": mae, "directional_accuracy": directional * 100, "no_change_error_pct": naive_mae, "skill_vs_no_change_pct": skill_vs_naive, "phase_lag_bars": phase_lag, "validation_passed": validation_passed, "samples": len(validation), "windows": windows},
-        "confidence": {"score": confidence, "grade": grade, "kind": "historical_calibration_quality", "not_probability": True, "capped_by_validation": capped_by_validation, "basis": ["chronological holdout error", "directional accuracy", "matured sample count"]},
+        "confidence": {"score": confidence, "grade": grade, "kind": "historical_calibration_quality", "not_probability": True, "capped_by_validation": capped_by_validation, "basis": ["holdout directional accuracy", "skill versus no-change baseline", "matured sample count"]},
         "series": {"predicted": _free_running_series(predictions[-60:], horizon), "one_shot_predicted": predictions[-60:], "actual": actual[-60:]},
         "forward_series": forward_series,
         "next_forecast": {"origin_time": bars[-1]["time"], "origin_price": latest_price, "target_time": terminal["time"], "predicted_price": terminal["value"], "predicted_return_pct": terminal_return_pct, "lower_price": terminal.get("lower"), "upper_price": terminal.get("upper"), "horizon_bars": terminal["step"], "horizon_label": display_horizon_label, "publishable": publishable, "publication_damping": publication_damping, "components": next_components},

@@ -534,7 +534,7 @@ function renderChart() {
     backgroundColor: 'transparent',
     grid: [{ left: 12, right: 14, top: 28, height: '61%', containLabel: true }, { left: 12, right: 14, top: '74%', height: '10%', containLabel: true }],
     tooltip: { trigger: 'axis', backgroundColor: '#111513', borderColor: '#3a443b', padding: [11, 13], textStyle: { color: '#f1f4ec', fontSize: 12 }, axisPointer: { type: 'line', lineStyle: { color: '#7f8b80' } }, formatter: (params) => chartTooltip(params, chartData) },
-    legend: { top: 0, right: 12, itemWidth: 20, itemHeight: 2, textStyle: { color: '#a9b2a8', fontSize: 11 }, data: ['实际价格', ...(fullForecast.value ? ['滚动前瞻'] : []), '未来路径', 'MA20'] },
+    legend: { top: 0, right: 12, itemWidth: 20, itemHeight: 2, textStyle: { color: '#a9b2a8', fontSize: 11 }, data: ['实际价格', ...(fullForecast.value ? ['单步前瞻'] : []), '未来路径', 'MA20'] },
     xAxis: [
       { type: 'category', data: chartData.axis, gridIndex: 0, boundaryGap: false, axisLine: { lineStyle: { color: '#394139' } }, axisTick: { show: false }, axisLabel: { color: '#909990', fontSize: 11, lineHeight: 15, hideOverlap: true, showMaxLabel: true, interval: 'auto', rich: { forecast: { color: '#c9baff', fontWeight: 650, lineHeight: 15 } }, formatter: (value, index) => chartAxisLabel(value, index, chartData) }, splitLine: { show: true, lineStyle: { color: '#1e2520' } } },
       { type: 'category', data: chartData.axis, gridIndex: 1, boundaryGap: false, axisLine: { lineStyle: { color: '#394139' } }, axisTick: { show: false }, axisLabel: { show: false }, splitLine: { show: false } },
@@ -687,7 +687,7 @@ onBeforeUnmount(() => {
           <div class="chart-key">
             <div class="key-items">
               <span><i class="actual-line"></i>实际价格</span>
-              <span v-if="fullForecast"><i class="backtest-line"></i>滚动前瞻</span>
+              <span v-if="fullForecast"><i class="backtest-line"></i>单步前瞻</span>
               <span><i class="forward-line"></i>未来路径</span>
               <span><i class="range-box"></i>模型区间</span>
             </div>
@@ -750,7 +750,7 @@ onBeforeUnmount(() => {
             <div><span>实时情绪</span><strong :class="marketSentiment.label">{{ Number(marketSentiment.score || 0) >= 0 ? '+' : '' }}{{ number(marketSentiment.score, 0) }}</strong></div>
             <div><span>训练隔离</span><strong>单标的状态</strong></div>
           </div>
-          <p class="model-disclaimer">{{ fullForecast ? '深紫色历史路径只在起点锚定一次，之后完全由当时预测连续推进；' : '' }}亮紫路径综合价格、量能、技术结构与关联内容逐步向前计算，半透明区域来自留出样本误差。反转闸门会撤销与最新状态冲突的方向。置信度不是涨跌概率。</p>
+          <p class="model-disclaimer">{{ fullForecast ? '深紫虚线为单步滚动回测——每个点都以当时实际价为起点只预测一步，用于观察真实拟合度；' : '' }}亮紫路径综合价格、量能、技术结构与关联内容逐步向前计算，半透明区域来自留出样本误差。反转闸门会撤销与最新状态冲突的方向。置信度不是涨跌概率。</p>
         </article>
       </section>
 
