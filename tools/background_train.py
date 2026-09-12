@@ -9,12 +9,15 @@ degrades to the deterministic engine untouched.
 from __future__ import annotations
 
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.config import read_json
 from scripts.finance import train_models
+from scripts.providers.eastmoney import daily_flow
+from scripts.symbols import normalize
 
 INTRADAY_ASSETS = 4
 
@@ -42,6 +45,18 @@ def main() -> int:
     if not assets:
         print("watchlist empty; nothing to train", flush=True)
         return 0
+    def refresh_flow(item: str) -> None:
+        market, symbol = item.split(":", 1) if ":" in item else ("auto", item)
+        market, symbol = normalize(market, symbol)
+        if market not in {"cn", "hk", "us"}:
+            return
+        try:
+            daily_flow(market, symbol)
+        except Exception as exc:  # optional context must never abort calibration
+            print(f"[context] {market}:{symbol} flow unavailable: {type(exc).__name__}", flush=True)
+
+    with ThreadPoolExecutor(max_workers=min(4, len(assets))) as pool:
+        list(pool.map(refresh_flow, assets))
     daily = train_models(assets, "3mo", "1d")
     summarize(daily, "1d")
     intraday = train_models(assets[:INTRADAY_ASSETS], "1mo", "5m")

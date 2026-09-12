@@ -53,25 +53,28 @@ def _trade(bars, samples, weights, means, scales, profile, rules, capital, thres
     equity = []
     in_market = 0
     known = list(samples[:start])
-    component_errors = {"ridge": None, "analogue": None, "trend": None}
+    component_errors = {"ridge": None, "analogue": None, "trend": None, "reversion": None}
+    component_directions = {"ridge": None, "analogue": None, "trend": None, "reversion": None}
+    baseline_error_ema = None
     raw_returns = []
     actual_returns = []
-    config = MODEL_PROFILES.get(profile, MODEL_PROFILES["market"])
-    fit_ridge = config["ridge"]
+    component_cap = ml._target_cap(samples[:start])
     for sample_index in range(start, end):
         sample = samples[sample_index]
         next_bar = bars[sample_index + 21] if sample_index + 21 < len(bars) else None
         if next_bar is None or not next_bar.get("open"):
             break
         row = ml._vector(sample["features"], means, scales)
-        ridge_return = ml._predict(weights, row)
-        analogue_return = ml._analogue_return(known, sample["features"], means, scales)
-        trend_return = ml._trend_return(sample["features"], horizon, profile)
-        blend = ml._component_weights(component_errors, profile)
-        raw_return, components = ml._ensemble_return(ridge_return, analogue_return, trend_return, blend)
+        ridge_return = ml._clip_return(ml._predict(weights, row), component_cap) or 0.0
+        analogue_return = ml._clip_return(ml._analogue_return(known, sample["features"], means, scales), component_cap)
+        trend_return = ml._clip_return(ml._trend_return(sample["features"], horizon, profile), component_cap) or 0.0
+        reversion_return = ml._clip_return(ml._reversion_return(sample["features"], horizon, profile), component_cap) or 0.0
+        blend = ml._component_weights(component_errors, profile, component_directions, baseline_error_ema)
+        raw_return, components = ml._ensemble_return(ridge_return, analogue_return, trend_return, reversion_return, blend)
         raw_return, _guarded = ml._regime_guard(raw_return, sample["features"], horizon, profile)
+        raw_return = ml._clip_return(raw_return, component_cap) or 0.0
         shrinkage = ml._return_shrinkage(raw_returns, actual_returns, profile)
-        predicted = max(-0.35, min(0.35, raw_return * shrinkage))
+        predicted = max(-component_cap, min(component_cap, raw_return * shrinkage))
 
         origin_bar = bars[sample_index + 20]
         origin_day = _bar_day(origin_bar)
@@ -108,15 +111,22 @@ def _trade(bars, samples, weights, means, scales, profile, rules, capital, thres
 
         # Consume the realized outcome exactly like the forecast validation walk.
         alpha = 0.12
-        residual = predicted - sample["target"]
-        rate = 0.025 / math.sqrt(sample_index - start + 1)
+        residual = max(-component_cap, min(component_cap, predicted - sample["target"]))
+        rate = 0.004 / math.sqrt(sample_index - start + 1)
+        weight_cap = max(.025, component_cap * 2.5)
         for index in range(len(weights)):
             penalty = 0.001 * weights[index] if index else 0.0
-            weights[index] -= rate * (residual * row[index] + penalty)
+            gradient = max(-.08, min(.08, residual * row[index] + penalty))
+            weights[index] = max(-weight_cap, min(weight_cap, weights[index] - rate * gradient))
         for name, value in components.items():
             component_error = abs(value - sample["target"])
             previous = component_errors.get(name)
             component_errors[name] = component_error if previous is None else (1 - alpha) * previous + alpha * component_error
+            direction_value = 1.0 if (value >= 0) == (sample["target"] >= 0) else 0.0
+            previous_direction = component_directions.get(name)
+            component_directions[name] = direction_value if previous_direction is None else (1 - alpha) * previous_direction + alpha * direction_value
+        naive_error = abs(sample["target"])
+        baseline_error_ema = naive_error if baseline_error_ema is None else (1 - alpha) * baseline_error_ema + alpha * naive_error
         actual_returns.append(sample["target"])
         raw_returns.append(raw_return)
         known.append(sample)

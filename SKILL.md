@@ -1,6 +1,6 @@
 ---
 name: finance
-description: Fetch verified live or delayed market data and perform deterministic stock, crypto, stablecoin, technical, position-risk, news-sentiment, and monitoring analysis. Use for prices, charts, indicators, comparisons, scenarios, depeg checks, and market screening; do not use it to place trades.
+description: Fetch verified live or delayed market data and perform deterministic stock, ETF, fund, futures, metal, crypto, stablecoin, technical, position-risk, news-sentiment, and monitoring analysis. Use for prices, charts, indicators, comparisons, scenarios, depeg checks, and market screening; do not use it to place trades.
 ---
 
 # Finance
@@ -12,6 +12,7 @@ Use the Python deterministic engine before making any financial claim. Never cal
 The installed launcher is `finance-skill`. If unavailable, run `${HERMES_SKILL_DIR}/.venv/bin/python ${HERMES_SKILL_DIR}/scripts/finance.py`.
 
 - Current quote: `finance-skill quote --market us --symbol NVDA`
+- ETF / fund / futures / metal: `finance-skill analyze --market etf --symbol SPY`, `--market fund --symbol VTSAX`, `--market future --symbol ES=F`, or `--market metal --symbol GOLD`
 - Technical and ML analysis: `finance-skill analyze --market hk --symbol 00700`
 - Stablecoin risk: `finance-skill stablecoin --symbol USDE`
 - Abnormal-move, volume, range, and related-news sentiment: `finance-skill news --market cn --symbol 601619`
@@ -20,13 +21,13 @@ The installed launcher is `finance-skill`. If unavailable, run `${HERMES_SKILL_D
 - Position analysis: append `--position-shares 100 --position-cost 120.5` to `analyze`.
 - Provider status: `finance-skill health`
 
-Valid markets are `auto`, `cn`, `hk`, `us`, and `crypto`. Prefer `quote` for a simple current-price request. Use `workflow` for comparison, scenario, or deep-analysis requests; repeat `--asset` for multiple assets.
+Valid markets or product profiles are `auto`, `cn`, `hk`, `us`, `crypto`, `etf`, `fund`, `future`, and `metal`. Prefer `quote` for a simple current-price request. Use `workflow` for comparison, scenario, or deep-analysis requests; repeat `--asset` for multiple assets.
 
 ## Operating contract
 
 1. Treat provider timestamps, feed delay, cache, stale flags, warnings, and errors as part of the answer.
 2. L0 fact requests never use an LLM. L1 deterministic and ML requests do not use an LLM. Only L2 comparison, scenario, decision-support, deep-analysis, or materially conflicting signals may use the optional specialist.
-3. Forecasting is Python-only. Keep predicted and realized series separate. Use market-adaptive horizons and an inspectable ensemble of regularized trend, similar historical regimes, and short-horizon velocity. Default charts to the forward path after the latest observed bar; show historical forecasts only when the user enables the complete prediction trail in Settings. Historical visualization shows one-shot walk-forward predictions (each point anchored at its own bar's actual close) so fit is visible; the free-running compounded path stays in the API payload for evaluation and must never be merged with observed prices. Apply the latest-bar reversal gate before publishing a direction. For `1d/5m`, return a timestamped forward path from the latest observed bar to that market session's close and rebuild it on every new bar. Once a calibration horizon matures, feed the realized result into the next training cycle. Forecast confidence is historical calibration quality, never a probability or promise.
+3. Forecasting is Python-only. Keep predicted and realized series separate. Use product-specific horizons and an inspectable four-component ensemble: regularized return regression, similar historical regimes, short-horizon velocity, and mean reversion. Weight components only from matured walk-forward error and direction results; cap standardized features and component returns. Calibrate amplitude with a causal weighted median that minimizes matured absolute error. Default charts to the forward path after the latest observed bar; show historical forecasts only when the user enables the complete prediction trail in Settings. Historical visualization shows one-shot walk-forward predictions (each point anchored at its own bar's actual close) so fit is visible; the free-running compounded path stays in the API payload for evaluation and must never be merged with observed prices. A latest-bar contradiction may damp an older model direction but must not replace it with assumed momentum. For `1d/5m`, return a timestamped forward path from the latest observed bar to that market session's close, fit no more than six direct future horizons, interpolate cumulative returns between those anchors, and rebuild on every new bar. Once a calibration horizon matures, feed the realized result into the next training cycle. Forecast confidence is historical calibration quality, never a probability or promise.
 4. A specialist interprets only the engine's compact verified payload. It never fetches quotes, calculates indicators, trains models, sees channel/user IDs, or places trades.
 5. If providers or the specialist fail, return the usable deterministic result and say what is unavailable. Never invent current data, news, causes, or forecast accuracy.
 6. For causal questions without event evidence, state that price/volume data cannot confirm the cause.

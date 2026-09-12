@@ -8,6 +8,10 @@ finance-skill quote --market cn --symbol 601619 --pretty
 finance-skill quote --market hk --symbol 00700 --pretty
 finance-skill quote --market us --symbol NVDA --pretty
 finance-skill analyze --market us --symbol NVDA --range 3mo --interval 1d --pretty
+finance-skill analyze --market etf --symbol SPY --range 1y --interval 1d --pretty
+finance-skill analyze --market fund --symbol VTSAX --range 1y --interval 1d --pretty
+finance-skill analyze --market future --symbol ES=F --range 1mo --interval 1d --pretty
+finance-skill analyze --market metal --symbol GOLD --range 1mo --interval 1d --pretty
 finance-skill analyze --market cn --symbol 601619 --position-shares 1700 --position-cost 5.839 --pretty
 finance-skill stablecoin --symbol USDT --pretty
 finance-skill news --market us --symbol NVDA --limit 10 --pretty

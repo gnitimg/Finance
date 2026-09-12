@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import heapq
 import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,12 +17,17 @@ FEATURE_NAMES = [
     "body_pct", "body_dominance", "upper_shadow", "lower_shadow", "gap_open", "inside_bar",
     "flow_z", "flow_trend_3d",
 ]
-STATE_VERSION = 10
+STATE_VERSION = 13
 MIN_SAMPLES = 15
 # Recency bounds keep the kNN analogue and the per-step path fits affordable
 # on long training contexts without changing their short-memory character.
-ANALOGUE_POOL = 500
-PATH_FIT_WINDOW = 800
+ANALOGUE_POOL = 240
+VALIDATION_WINDOW = 240
+PATH_FIT_WINDOW = 420
+PATH_MAX_FITS = 6
+MAX_STANDARD_SCORE = 6.0
+SHRINKAGE_WINDOW = 120
+MIN_SHRINKAGE_SAMPLES = 12
 INTERVAL_MINUTES = {"1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "90m": 90}
 MARKET_SESSIONS = {
     "cn": ("Asia/Shanghai", ((570, 690), (780, 900))),
@@ -31,16 +37,16 @@ MARKET_SESSIONS = {
     "fund": ("America/New_York", ((570, 960),)),
 }
 MODEL_PROFILES = {
-    "market": {"horizon": 3, "ridge": 2.5, "ridge_small": 7.0, "weights": {"ridge": .40, "analogue": .22, "trend": .38}, "velocity": .58, "context_scale": .72, "initial_shrink": .18},
-    "cn_equity": {"horizon": 1, "ridge": 3.0, "ridge_small": 7.5, "weights": {"ridge": .34, "analogue": .20, "trend": .46}, "velocity": .66, "context_scale": .82, "initial_shrink": .16},
-    "hk_equity": {"horizon": 1, "ridge": 2.8, "ridge_small": 7.0, "weights": {"ridge": .36, "analogue": .24, "trend": .40}, "velocity": .62, "context_scale": .78, "initial_shrink": .17},
-    "us_equity": {"horizon": 3, "ridge": 2.5, "ridge_small": 6.5, "weights": {"ridge": .40, "analogue": .24, "trend": .36}, "velocity": .56, "context_scale": .76, "initial_shrink": .18},
-    "etf": {"horizon": 3, "ridge": 3.2, "ridge_small": 7.5, "weights": {"ridge": .42, "analogue": .30, "trend": .28}, "velocity": .42, "context_scale": .58, "initial_shrink": .16},
-    "fund": {"horizon": 2, "ridge": 4.5, "ridge_small": 9.0, "weights": {"ridge": .50, "analogue": .34, "trend": .16}, "velocity": .28, "context_scale": .42, "initial_shrink": .12},
-    "future": {"horizon": 2, "ridge": 2.8, "ridge_small": 6.5, "weights": {"ridge": .32, "analogue": .20, "trend": .48}, "velocity": .72, "context_scale": .88, "initial_shrink": .20},
-    "metal": {"horizon": 2, "ridge": 3.3, "ridge_small": 7.5, "weights": {"ridge": .36, "analogue": .30, "trend": .34}, "velocity": .48, "context_scale": .70, "initial_shrink": .16},
-    "crypto": {"horizon": 3, "ridge": 3.0, "ridge_small": 7.0, "weights": {"ridge": .36, "analogue": .22, "trend": .42}, "velocity": .64, "context_scale": .84, "initial_shrink": .22},
-    "stablecoin": {"horizon": 5, "ridge": 5.0, "ridge_small": 9.0, "weights": {"ridge": .44, "analogue": .34, "trend": .22}, "velocity": .12, "context_scale": .30, "initial_shrink": .58},
+    "market": {"horizon": 3, "ridge": 2.5, "ridge_small": 7.0, "weights": {"ridge": .34, "analogue": .20, "trend": .34, "reversion": .12}, "velocity": .58, "context_scale": .72, "initial_shrink": .18},
+    "cn_equity": {"horizon": 1, "ridge": 3.0, "ridge_small": 7.5, "weights": {"ridge": .31, "analogue": .19, "trend": .42, "reversion": .08}, "velocity": .66, "context_scale": .82, "initial_shrink": .16},
+    "hk_equity": {"horizon": 1, "ridge": 2.8, "ridge_small": 7.0, "weights": {"ridge": .33, "analogue": .23, "trend": .36, "reversion": .08}, "velocity": .62, "context_scale": .78, "initial_shrink": .17},
+    "us_equity": {"horizon": 3, "ridge": 2.5, "ridge_small": 6.5, "weights": {"ridge": .34, "analogue": .22, "trend": .32, "reversion": .12}, "velocity": .56, "context_scale": .76, "initial_shrink": .18},
+    "etf": {"horizon": 3, "ridge": 3.2, "ridge_small": 7.5, "weights": {"ridge": .34, "analogue": .27, "trend": .21, "reversion": .18}, "velocity": .42, "context_scale": .58, "initial_shrink": .16},
+    "fund": {"horizon": 2, "ridge": 4.5, "ridge_small": 9.0, "weights": {"ridge": .39, "analogue": .29, "trend": .12, "reversion": .20}, "velocity": .28, "context_scale": .42, "initial_shrink": .12},
+    "future": {"horizon": 2, "ridge": 2.8, "ridge_small": 6.5, "weights": {"ridge": .30, "analogue": .18, "trend": .46, "reversion": .06}, "velocity": .72, "context_scale": .88, "initial_shrink": .20},
+    "metal": {"horizon": 2, "ridge": 3.3, "ridge_small": 7.5, "weights": {"ridge": .31, "analogue": .26, "trend": .27, "reversion": .16}, "velocity": .48, "context_scale": .70, "initial_shrink": .16},
+    "crypto": {"horizon": 3, "ridge": 3.0, "ridge_small": 7.0, "weights": {"ridge": .32, "analogue": .20, "trend": .38, "reversion": .10}, "velocity": .64, "context_scale": .84, "initial_shrink": .22},
+    "stablecoin": {"horizon": 5, "ridge": 5.0, "ridge_small": 9.0, "weights": {"ridge": .32, "analogue": .28, "trend": .12, "reversion": .28}, "velocity": .12, "context_scale": .30, "initial_shrink": .58},
 }
 
 
@@ -220,7 +226,31 @@ def _standardize(samples: list[dict]) -> tuple[list[float], list[float]]:
 
 
 def _vector(features: list[float], means: list[float], scales: list[float]) -> list[float]:
-    return [1.0] + [(value - mean) / scale for value, mean, scale in zip(features, means, scales)]
+    values = []
+    for value, mean, scale in zip(features, means, scales):
+        standardized = (value - mean) / max(scale, 1e-8)
+        if not math.isfinite(standardized):
+            standardized = 0.0
+        values.append(max(-MAX_STANDARD_SCORE, min(MAX_STANDARD_SCORE, standardized)))
+    return [1.0] + values
+
+
+def _target_cap(samples: list[dict]) -> float:
+    """Causal return guard derived only from the model's training window."""
+    values = sorted(abs(float(sample["target"])) for sample in samples if math.isfinite(float(sample["target"])))
+    if not values:
+        return 0.04
+    percentile = values[min(len(values) - 1, int((len(values) - 1) * .95))]
+    return min(.20, max(.004, percentile * 1.6))
+
+
+def _clip_return(value: float | None, cap: float) -> float | None:
+    if value is None:
+        return None
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        return 0.0
+    return max(-cap, min(cap, numeric))
 
 
 def _fit(samples: list[dict], ridge: float = 2.0) -> tuple[list[float], list[float], list[float]]:
@@ -234,8 +264,13 @@ def _fit(samples: list[dict], ridge: float = 2.0) -> tuple[list[float], list[flo
         recency_weight = 0.18 + 0.82 * ((sample_index + 1) / total_samples) ** 2
         for i in range(size):
             vector[i] += recency_weight * row[i] * sample["target"]
-            for j in range(size):
+            # X'X is symmetric; calculating only one triangle nearly halves
+            # the hottest pure-Python loop across validation and path fits.
+            for j in range(i, size):
                 matrix[i][j] += recency_weight * row[i] * row[j]
+    for i in range(size):
+        for j in range(i):
+            matrix[i][j] = matrix[j][i]
     for i in range(1, size):
         matrix[i][i] += ridge
     return _solve(matrix, vector), means, scales
@@ -258,6 +293,15 @@ def _trend_return(features: list[float], horizon: int, profile: str) -> float:
     return continuation + 0.16 * acceleration * min(horizon, 3) + mean_reversion
 
 
+def _reversion_return(features: list[float], horizon: int, profile: str) -> float:
+    ma3_gap = features[4]
+    ma20_gap = features[14]
+    breakout = features[15]
+    strength = .85 if profile == "stablecoin" else .48 if profile in {"etf", "fund", "metal"} else .34
+    horizon_scale = min(1.8, math.sqrt(max(1, horizon)))
+    return -strength * (.68 * ma20_gap + .24 * ma3_gap + .08 * breakout * abs(features[9])) * horizon_scale
+
+
 def _analogue_return(reference: list[dict], features: list[float], means: list[float], scales: list[float]) -> float | None:
     if len(reference) < 12:
         return None
@@ -270,37 +314,64 @@ def _analogue_return(reference: list[dict], features: list[float], means: list[f
         distance = math.sqrt(sum((left - right) ** 2 for left, right in zip(target, candidate)) / len(target))
         recency = 0.65 + 0.35 * (index + 1) / total
         ranked.append((distance, recency, float(sample["target"])))
-    nearest = sorted(ranked, key=lambda item: item[0])[:min(9, max(4, int(math.sqrt(total))))]
+    nearest = heapq.nsmallest(min(9, max(4, int(math.sqrt(total)))), ranked, key=lambda item: item[0])
     weights = [recency / max(0.12, distance) for distance, recency, _ in nearest]
     denominator = sum(weights)
     return sum(weight * item[2] for weight, item in zip(weights, nearest)) / denominator if denominator else None
 
 
-def _component_weights(errors: dict[str, float | None], profile: str = "market") -> dict[str, float]:
+def _component_weights(errors: dict[str, float | None], profile: str = "market", directions: dict[str, float | None] | None = None, baseline_error: float | None = None) -> dict[str, float]:
     defaults = MODEL_PROFILES.get(profile, MODEL_PROFILES["market"])["weights"]
     if not errors or all(value is None for value in errors.values()):
         return defaults
-    raw = {name: 1 / max(0.0015, float(errors.get(name) or 0.02)) for name in defaults}
+    directions = directions or {}
+    raw = {}
+    for name, prior in defaults.items():
+        error = max(.0005, float(errors.get(name) or .02))
+        direction = directions.get(name)
+        direction_factor = 1.0 if direction is None else max(.25, min(1.75, 1 + 3 * (float(direction) - .5)))
+        baseline_factor = 1.0 if not baseline_error else max(.25, min(1.4, float(baseline_error) / error))
+        raw[name] = prior * direction_factor * baseline_factor / error
     total = sum(raw.values())
     normalized = {name: value / total for name, value in raw.items()}
-    clipped = {name: min(0.68, max(0.12, normalized[name])) for name in defaults}
+    clipped = {name: min(0.76, max(0.04, normalized[name])) for name in defaults}
     clipped_total = sum(clipped.values())
     return {name: value / clipped_total for name, value in clipped.items()}
 
 
-def _ensemble_return(ridge: float, analogue: float | None, trend: float, weights: dict[str, float]) -> tuple[float, dict[str, float]]:
-    components = {"ridge": ridge, "analogue": ridge if analogue is None else analogue, "trend": trend}
+def _ensemble_return(ridge: float, analogue: float | None, trend: float, reversion: float, weights: dict[str, float]) -> tuple[float, dict[str, float]]:
+    components = {"ridge": ridge, "analogue": ridge if analogue is None else analogue, "trend": trend, "reversion": reversion}
     return sum(weights[name] * value for name, value in components.items()), components
 
 
 def _return_shrinkage(predicted: list[float], actual: list[float], profile: str) -> float:
-    if len(predicted) < 6 or len(predicted) != len(actual):
-        return MODEL_PROFILES.get(profile, MODEL_PROFILES["market"])["initial_shrink"]
-    denominator = sum(value * value for value in predicted)
-    if denominator < 1e-12:
-        return 0.05
-    slope = sum(estimate * realized for estimate, realized in zip(predicted, actual)) / denominator
-    return max(0.04, min(1.05, slope))
+    config = MODEL_PROFILES.get(profile, MODEL_PROFILES["market"])
+    if len(predicted) < MIN_SHRINKAGE_SAMPLES or len(predicted) != len(actual):
+        # Stay deliberately small until enough genuinely matured estimates
+        # exist.  A profile prior may shape a path but must not dominate it.
+        return min(.03, max(.01, config["initial_shrink"] * .1))
+    # The non-negative weighted median of realized/predicted ratios minimizes
+    # absolute return error on the matured window.  It is robust to a single
+    # price shock and, unlike a signed OLS slope, never turns an anti-correlated
+    # model into a confident opposite-direction forecast after the fact.
+    pairs = sorted(
+        (realized / estimate, abs(estimate))
+        for estimate, realized in zip(predicted[-SHRINKAGE_WINDOW:], actual[-SHRINKAGE_WINDOW:])
+        if abs(estimate) > 1e-8
+    )
+    total_weight = sum(weight for _ratio, weight in pairs)
+    if not pairs or total_weight < 1e-12:
+        return 0.0
+    cursor = 0.0
+    median_ratio = 0.0
+    for ratio, weight in pairs:
+        cursor += weight
+        if cursor >= total_weight / 2:
+            median_ratio = ratio
+            break
+    calibrated = max(0.0, min(1.05, median_ratio))
+    sample_reliability = len(pairs) / (len(pairs) + 18)
+    return calibrated * sample_reliability
 
 
 def _regime_guard(predicted: float, features: list[float], horizon: int, profile: str) -> tuple[float, bool]:
@@ -315,10 +386,13 @@ def _regime_guard(predicted: float, features: list[float], horizon: int, profile
     reversal = predicted * fast_signal < 0 and abs(fast_signal) >= 0.42 * volatility
     if not reversal:
         return predicted, False
-    guarded = 0.28 * predicted + 0.72 * fast_signal * math.sqrt(max(1, horizon))
-    if guarded * fast_signal < 0:
-        guarded = 0.0
-    return guarded, True
+    # A just-observed move is evidence of a regime conflict, not proof that the
+    # next bar repeats it.  Replacing the model direction with this signal made
+    # the forecast itself lag.  Veto amplitude instead: ordinary conflicts keep
+    # roughly 40%, while an extreme contradiction leaves only 8%.
+    contradiction = min(1.0, abs(fast_signal) / (2 * volatility))
+    damping = .50 - .42 * contradiction
+    return predicted * damping, True
 
 
 def _live_context_return(live_context: dict | None, features: list[float], horizon: int, profile: str) -> tuple[float, dict]:
@@ -480,25 +554,59 @@ def _direct_return(bars: list[dict], horizon: int, profile: str = "market") -> f
     config = MODEL_PROFILES.get(profile, MODEL_PROFILES["market"])
     ridge = config["ridge_small"] if len(samples) < 40 else config["ridge"]
     weights, means, scales = _fit(samples, ridge=ridge)
-    ridge = _predict(weights, _vector(latest, means, scales))
-    analogue = _analogue_return(samples, latest, means, scales)
-    predicted, _ = _ensemble_return(ridge, analogue, _trend_return(latest, horizon, profile), _component_weights({}, profile))
+    target_cap = _target_cap(samples)
+    ridge = _clip_return(_predict(weights, _vector(latest, means, scales)), target_cap)
+    analogue = _clip_return(_analogue_return(samples, latest, means, scales), target_cap)
+    trend = _clip_return(_trend_return(latest, horizon, profile), target_cap)
+    reversion = _clip_return(_reversion_return(latest, horizon, profile), target_cap)
+    predicted, _ = _ensemble_return(ridge or 0.0, analogue, trend or 0.0, reversion or 0.0, _component_weights({}, profile))
     predicted, _ = _regime_guard(predicted, latest, horizon, profile)
     cap = _return_cap(bars, horizon)
     return max(-cap, min(cap, predicted))
 
 
-def _forward_path(bars: list[dict], times: list[str], base_horizon: int, base_return: float, profile: str, shrinkage: float, publication_damping: float, live_context: dict | None, residual_sigma: float) -> list[dict]:
-    if not bars or not times:
+def _path_anchor_steps(point_count: int, base_horizon: int) -> list[int]:
+    if point_count <= 0:
         return []
+    anchors = {1, point_count, min(point_count, max(1, base_horizon))}
+    for ratio in (.25, .5, .75):
+        anchors.add(max(1, min(point_count, round(point_count * ratio))))
+    ordered = sorted(anchors)
+    if len(ordered) <= PATH_MAX_FITS:
+        return ordered
+    middle = ordered[1:-1]
+    keep = [middle[round(index * (len(middle) - 1) / max(1, PATH_MAX_FITS - 3))] for index in range(PATH_MAX_FITS - 2)]
+    return sorted({ordered[0], *keep, ordered[-1]})
+
+
+def _interpolated_return(anchors: dict[int, float], step: int) -> float:
+    keys = sorted(anchors)
+    if step <= keys[0]:
+        return anchors[keys[0]] * step / max(1, keys[0])
+    if step >= keys[-1]:
+        return anchors[keys[-1]]
+    for left, right in zip(keys, keys[1:]):
+        if left <= step <= right:
+            progress = (step - left) / max(1, right - left)
+            return anchors[left] * (1 - progress) + anchors[right] * progress
+    return anchors[keys[-1]]
+
+
+def _forward_path(bars: list[dict], times: list[str], base_horizon: int, base_return: float, profile: str, shrinkage: float, publication_damping: float, live_context: dict | None, residual_sigma: float) -> tuple[list[dict], int]:
+    if not bars or not times:
+        return [], 0
     latest_price = float(bars[-1]["close"])
     latest_features = _features(bars, len(bars) - 1)
     result = [{"time": bars[-1]["time"], "value": latest_price, "step": 0, "kind": "origin"}]
+    anchor_returns = {}
+    for anchor in _path_anchor_steps(len(times), base_horizon):
+        direct = base_return if anchor == base_horizon else _direct_return(bars, anchor, profile)
+        if direct is None:
+            direct = base_return * math.sqrt(anchor / max(1, base_horizon))
+        anchor_returns[anchor] = direct
     previous_return = 0.0
     for step, target_time in enumerate(times, 1):
-        direct = base_return if step == base_horizon else _direct_return(bars, step, profile)
-        if direct is None:
-            direct = base_return * step / max(1, base_horizon)
+        direct = _interpolated_return(anchor_returns, step)
         model_return = direct * shrinkage
         context_return, _ = _live_context_return(live_context, latest_features, step, profile) if latest_features else (0.0, {})
         combined = (model_return + context_return) * publication_damping
@@ -515,7 +623,7 @@ def _forward_path(bars: list[dict], times: list[str], base_horizon: int, base_re
             "step": step, "kind": "forecast",
         })
         previous_return = smoothed
-    return result
+    return result, len(anchor_returns)
 
 
 def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", horizon: int = 3, to_session_close: bool = False, asset_type: str | None = None, live_context: dict | None = None, flow: list[dict] | None = None) -> dict:
@@ -531,7 +639,8 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
     # Train on the earlier 60% and walk the most recent 40% chronologically;
     # three consecutive windows report whether skill is stable or regime-lucky.
     split = min(len(samples) - 4, max(10, int(len(samples) * 0.6)))
-    train, validation = samples[:split], samples[split:]
+    validation_start = max(split, len(samples) - VALIDATION_WINDOW)
+    train, validation = samples[:validation_start], samples[validation_start:]
     model_dir = DATA_DIR / "models"
     model_dir.mkdir(exist_ok=True)
     model_path = model_dir / f"{_safe_name(market, symbol, interval)}.json"
@@ -571,7 +680,7 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
             "base_samples": len(train),
             "weights": weights, "means": means, "scales": scales,
             "updates": 0, "last_matured_at": None, "error_ema": None, "direction_ema": None,
-            "component_error_ema": {"ridge": None, "analogue": None, "trend": None},
+            "component_error_ema": {"ridge": None, "analogue": None, "trend": None, "reversion": None},
         }
     else:
         state["base_samples"] = len(train)
@@ -585,25 +694,30 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
     means = [float(value) for value in means]
     scales = [float(value) for value in scales]
     last_matured = state.get("last_matured_at")
-    component_errors = {"ridge": None, "analogue": None, "trend": None}
+    component_errors = {"ridge": None, "analogue": None, "trend": None, "reversion": None}
+    component_directions = {"ridge": None, "analogue": None, "trend": None, "reversion": None}
+    baseline_error_ema = None
     known_samples = train[:]
     naive_errors = []
     predicted_returns = []
     actual_returns = []
     raw_returns = []
     regime_guard_count = 0
+    component_cap = _target_cap(train)
     for validation_index, sample in enumerate(validation):
         row = _vector(sample["features"], means, scales)
-        ridge_return = _predict(weights, row)
-        analogue_return = _analogue_return(known_samples, sample["features"], means, scales)
-        trend_return = _trend_return(sample["features"], horizon, profile)
-        blend = _component_weights(component_errors, profile)
-        raw_return, components = _ensemble_return(ridge_return, analogue_return, trend_return, blend)
+        ridge_return = _clip_return(_predict(weights, row), component_cap) or 0.0
+        analogue_return = _clip_return(_analogue_return(known_samples, sample["features"], means, scales), component_cap)
+        trend_return = _clip_return(_trend_return(sample["features"], horizon, profile), component_cap) or 0.0
+        reversion_return = _clip_return(_reversion_return(sample["features"], horizon, profile), component_cap) or 0.0
+        blend = _component_weights(component_errors, profile, component_directions, baseline_error_ema)
+        raw_return, components = _ensemble_return(ridge_return, analogue_return, trend_return, reversion_return, blend)
         raw_return, regime_guarded = _regime_guard(raw_return, sample["features"], horizon, profile)
+        raw_return = _clip_return(raw_return, component_cap) or 0.0
         regime_guard_count += int(regime_guarded)
         shrinkage = _return_shrinkage(raw_returns, actual_returns, profile)
         predicted_return = raw_return * shrinkage
-        predicted_return = max(-0.35, min(0.35, predicted_return))
+        predicted_return = max(-component_cap, min(component_cap, predicted_return))
         predicted_price = sample["origin_price"] * math.exp(predicted_return)
         error_pct = abs(predicted_price / sample["target_price"] - 1) * 100
         direction_ok = (predicted_return >= 0) == (sample["target"] >= 0)
@@ -615,16 +729,23 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
         raw_returns.append(raw_return)
         predictions.append({"time": sample["target_time"], "value": predicted_price, "origin_time": sample["origin_time"], "origin_price": sample["origin_price"], "predicted_return": predicted_return})
         actual.append({"time": sample["target_time"], "value": sample["target_price"]})
-        rate = 0.025 / math.sqrt(validation_index + 1)
-        residual = predicted_return - sample["target"]
+        rate = 0.004 / math.sqrt(validation_index + 1)
+        residual = max(-component_cap, min(component_cap, predicted_return - sample["target"]))
+        weight_cap = max(.025, component_cap * 2.5)
         for index in range(len(weights)):
             penalty = 0.001 * weights[index] if index else 0.0
-            weights[index] -= rate * (residual * row[index] + penalty)
+            gradient = max(-.08, min(.08, residual * row[index] + penalty))
+            weights[index] = max(-weight_cap, min(weight_cap, weights[index] - rate * gradient))
         alpha = 0.12
         for name, value in components.items():
             component_error = abs(value - sample["target"])
             previous = component_errors.get(name)
             component_errors[name] = component_error if previous is None else (1 - alpha) * previous + alpha * component_error
+            direction_value = 1.0 if (value >= 0) == (sample["target"] >= 0) else 0.0
+            previous_direction = component_directions.get(name)
+            component_directions[name] = direction_value if previous_direction is None else (1 - alpha) * previous_direction + alpha * direction_value
+        naive_log_error = abs(sample["target"])
+        baseline_error_ema = naive_log_error if baseline_error_ema is None else (1 - alpha) * baseline_error_ema + alpha * naive_log_error
         if not last_matured or sample["target_time"] > last_matured:
             state["error_ema"] = error_pct if state["error_ema"] is None else (1 - alpha) * state["error_ema"] + alpha * error_pct
             direction_value = 1.0 if direction_ok else 0.0
@@ -635,6 +756,7 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
 
     state["weights"] = weights
     state["component_error_ema"] = component_errors
+    state["component_direction_ema"] = component_directions
     model_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     mae = sum(evaluation_errors) / len(evaluation_errors)
     directional = sum(evaluation_directions) / len(evaluation_directions)
@@ -676,16 +798,20 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
     grade = "high" if confidence >= 70 else "medium" if confidence >= 48 else "low"
     latest_features = _features(bars, len(bars) - 1, flow_by_index[-1] if flow_by_index else None)
     if latest_features:
-        ridge_return = _predict(weights, _vector(latest_features, means, scales))
-        analogue_return = _analogue_return(samples, latest_features, means, scales)
-        raw_next_return, next_components = _ensemble_return(ridge_return, analogue_return, _trend_return(latest_features, horizon, profile), _component_weights(component_errors, profile))
+        ridge_return = _clip_return(_predict(weights, _vector(latest_features, means, scales)), component_cap) or 0.0
+        analogue_return = _clip_return(_analogue_return(samples, latest_features, means, scales), component_cap)
+        trend_return = _clip_return(_trend_return(latest_features, horizon, profile), component_cap) or 0.0
+        reversion_return = _clip_return(_reversion_return(latest_features, horizon, profile), component_cap) or 0.0
+        live_weights = _component_weights(component_errors, profile, component_directions, baseline_error_ema)
+        raw_next_return, next_components = _ensemble_return(ridge_return, analogue_return, trend_return, reversion_return, live_weights)
         raw_next_return, latest_regime_guarded = _regime_guard(raw_next_return, latest_features, horizon, profile)
+        raw_next_return = _clip_return(raw_next_return, component_cap) or 0.0
         final_shrinkage = _return_shrinkage(raw_returns, actual_returns, profile)
         context_return, live_context_meta = _live_context_return(live_context, latest_features, horizon, profile)
         next_return = (raw_next_return * final_shrinkage + context_return) * publication_damping
         next_components["live_context"] = context_return
     else:
-        next_return, next_components, final_shrinkage, latest_regime_guarded, live_context_meta = 0.0, {"ridge": 0.0, "analogue": 0.0, "trend": 0.0, "live_context": 0.0}, 0.05, False, {}
+        next_return, next_components, final_shrinkage, latest_regime_guarded, live_context_meta = 0.0, {"ridge": 0.0, "analogue": 0.0, "trend": 0.0, "reversion": 0.0, "live_context": 0.0}, 0.05, False, {}
     base_cap = _return_cap(bars, horizon)
     next_return = max(-base_cap, min(base_cap, next_return))
     latest_price = float(bars[-1]["close"])
@@ -693,24 +819,24 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
     residuals = [predicted - realized for predicted, realized in zip(predicted_returns, actual_returns)]
     residual_mean = sum(residuals) / len(residuals) if residuals else 0.0
     residual_sigma = math.sqrt(sum((value - residual_mean) ** 2 for value in residuals) / max(1, len(residuals) - 1)) if residuals else 0.0
-    forward_series = _forward_path(bars, future_times, horizon, raw_next_return if latest_features else 0.0, profile, final_shrinkage, publication_damping, live_context, residual_sigma)
+    forward_series, path_model_fits = _forward_path(bars, future_times, horizon, raw_next_return if latest_features else 0.0, profile, final_shrinkage, publication_damping, live_context, residual_sigma)
     terminal = forward_series[-1] if forward_series else {"time": bars[-1]["time"], "value": latest_price, "step": 0}
     terminal_return_pct = (float(terminal["value"]) / latest_price - 1) * 100
     result = {
         "status": "ready",
-        "method": "adaptive_market_ensemble_sentiment_path_v6",
+        "method": "adaptive_market_ensemble_sentiment_path_v13",
         "horizon_bars": len(future_times) if to_session_close else horizon,
         "horizon_label": display_horizon_label,
         "calibration_horizon_bars": horizon,
         "calibration_horizon_label": _horizon_label(interval, horizon),
-        "training": {"initial_samples": len(train), "base_samples": state.get("base_samples", len(train)), "evaluation_samples": len(validation), "online_updates": state["updates"], "last_matured_at": state.get("last_matured_at"), "refresh_trigger": "each newly observed bar"},
+        "training": {"initial_samples": len(train), "base_samples": state.get("base_samples", len(train)), "evaluation_samples": len(validation), "validation_window_limit": VALIDATION_WINDOW, "online_updates": state["updates"], "last_matured_at": state.get("last_matured_at"), "refresh_trigger": "each newly observed bar", "state_version": STATE_VERSION},
         "evaluation": {"mean_absolute_error_pct": mae, "directional_accuracy": directional * 100, "no_change_error_pct": naive_mae, "skill_vs_no_change_pct": skill_vs_naive, "phase_lag_bars": phase_lag, "validation_passed": validation_passed, "samples": len(validation), "windows": windows},
         "confidence": {"score": confidence, "grade": grade, "kind": "historical_calibration_quality", "not_probability": True, "capped_by_validation": capped_by_validation, "basis": ["holdout directional accuracy", "skill versus no-change baseline", "matured sample count"]},
         "series": {"predicted": _free_running_series(predictions[-60:], horizon), "one_shot_predicted": predictions[-60:], "actual": actual[-60:]},
         "forward_series": forward_series,
         "next_forecast": {"origin_time": bars[-1]["time"], "origin_price": latest_price, "target_time": terminal["time"], "predicted_price": terminal["value"], "predicted_return_pct": terminal_return_pct, "lower_price": terminal.get("lower"), "upper_price": terminal.get("upper"), "horizon_bars": terminal["step"], "horizon_label": display_horizon_label, "publishable": publishable, "publication_damping": publication_damping, "components": next_components},
-        "ensemble": {"profile": profile, "state_scope": f"{market}:{symbol}:{interval}", "weights": _component_weights(component_errors, profile), "return_shrinkage": final_shrinkage, "latest_regime_guarded": latest_regime_guarded, "historical_regime_guards": regime_guard_count, "live_context": live_context_meta, "components": ["regularized trend model", "similar historical regimes", "short-horizon velocity", "live market sentiment"]},
-        "path": {"scope": "session_close" if to_session_close else "fixed_horizon", "points": len(forward_series), "starts_at": bars[-1]["time"], "ends_at": terminal["time"], "updates_on_new_bar": True},
+        "ensemble": {"profile": profile, "state_scope": f"{market}:{symbol}:{interval}", "weights": _component_weights(component_errors, profile, component_directions, baseline_error_ema), "component_calibration": {name: {"error_ema": component_errors.get(name), "direction_ema_pct": None if component_directions.get(name) is None else component_directions[name] * 100} for name in component_errors}, "return_shrinkage": final_shrinkage, "amplitude_calibration": "causal_weighted_median_absolute_error", "component_return_cap": component_cap, "numerical_guard": f"winsorized_z_{MAX_STANDARD_SCORE:g}", "latest_regime_guarded": latest_regime_guarded, "historical_regime_guards": regime_guard_count, "live_context": live_context_meta, "components": ["regularized trend model", "similar historical regimes", "short-horizon velocity", "mean reversion", "live market sentiment"]},
+        "path": {"scope": "session_close" if to_session_close else "fixed_horizon", "points": len(forward_series), "direct_model_fits": path_model_fits, "interpolation": "cumulative_return_between_direct_horizon_models", "starts_at": bars[-1]["time"], "ends_at": terminal["time"], "updates_on_new_bar": True},
         "disclaimer": "Statistical estimate from historical bars; not a probability, guarantee, or trading instruction.",
     }
     state["last_forecast"] = {"key": cache_fingerprint, "cached_at": _iso_value(datetime.now(timezone.utc))}

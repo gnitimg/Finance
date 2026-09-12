@@ -4,12 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -25,8 +25,8 @@ from scripts.config import load_dotenv, read_json
 from scripts.models import FinanceError, clean_json, utc_now
 from scripts.monitoring.ml import adaptive_horizon, flow_series_by_index, forecast
 from scripts.monitoring.scanner import scan as monitor_scan
-from scripts.news.service import get_news
-from scripts.providers.eastmoney import daily_flow
+from scripts.news.service import cached_news, get_news
+from scripts.providers.eastmoney import cached_daily_flow
 from scripts.providers.service import history, quote
 from scripts.providers.tencent import order_book_cn
 from scripts.routing import classify
@@ -69,6 +69,22 @@ def align_model_history(context_history: list[dict], display_history: list[dict]
     return aligned
 
 
+def latest_market_session(bars: list[dict], zone_name: str | None) -> list[dict]:
+    """Return only the latest exchange-local trading date for a 1D chart."""
+    if not bars:
+        return []
+    try:
+        zone = ZoneInfo(zone_name or "UTC")
+    except (KeyError, ValueError):
+        zone = ZoneInfo("UTC")
+
+    def session_day(bar: dict):
+        return datetime.fromtimestamp(_bar_epoch(bar), tz=zone).date()
+
+    latest_day = session_day(bars[-1])
+    return [bar for bar in bars if session_day(bar) == latest_day]
+
+
 def quote_asset(market: str, symbol: str) -> dict:
     started = time.perf_counter()
     result = envelope("quote")
@@ -85,22 +101,25 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
     result = envelope("analyze")
     data_started = time.perf_counter()
     market, symbol = normalize(market, symbol)
-    market_data = history(market, symbol, range_name, interval)
-    display_history = market_data.get("history") or []
-    ml_history = display_history
-    news_box = {}
-    if use_ml:
-        def _fetch_news():
-            try:
-                news_box["value"] = get_news(market, symbol, 8, (market_data.get("asset") or {}).get("name"))
-            except Exception as exc:  # noqa: BLE001 - degrade to deterministic result
-                news_box["error"] = type(exc).__name__
-        threading.Thread(target=_fetch_news, daemon=True).start()
-    ml_context = {"range": range_name, "interval": interval, "bars": len(display_history), "extended": False}
+    shared_intraday_context = range_name == "1d" and interval == "5m" and market in {"cn", "hk", "us", "etf", "fund"}
+    market_data = history(market, symbol, "5d" if shared_intraday_context else range_name, interval)
+    fetched_history = market_data.get("history") or []
+    display_history = latest_market_session(fetched_history, (market_data.get("asset") or {}).get("timezone")) if shared_intraday_context else fetched_history
+    if shared_intraday_context:
+        market_data = {**market_data, "history": display_history}
+    ml_history = fetched_history if shared_intraday_context and use_ml else display_history
+    related_content = cached_news(market, symbol) if use_ml else None
+    ml_context = {
+        "range": "5d" if shared_intraday_context else range_name,
+        "interval": interval,
+        "bars": len(fetched_history) if shared_intraday_context else len(ml_history),
+        "extended": shared_intraday_context,
+        "live_edge_aligned": shared_intraday_context,
+    }
     if use_ml:
         # Intraday keeps the fast 5-day context so monitor scans stay quick; deep
         # intraday training is available on demand via `train --range 1mo`.
-        context = ("5d", "5m") if interval == "5m" and range_name == "1d" else (("1y", "1d") if market == "crypto" else ("5y", "1d")) if interval == "1d" else None
+        context = None if shared_intraday_context else (("1y", "1d") if market == "crypto" else ("5y", "1d")) if interval == "1d" else None
         if context and context != (range_name, interval):
             try:
                 context_data = history(market, symbol, context[0], context[1])
@@ -113,13 +132,10 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
     data_ms = round((time.perf_counter() - data_started) * 1000, 2)
     analysis_started = time.perf_counter()
     technical = technical_analysis(display_history, market_data["quote"].get("price"))
-    related_content = news_box.get("value")
-    if news_box.get("error"):
-        result["warnings"].append(f"Related-content sentiment unavailable: {news_box['error']}")
     market_sentiment = market_sentiment_analysis(display_history, market_data["quote"], technical, (related_content or {}).get("sentiment"))
     market_sentiment["sources"] = [market_data["quote"].get("source"), "technical and anomaly engine"]
     if (related_content or {}).get("sentiment", {}).get("evidence_count"):
-        market_sentiment["sources"].append("GDELT / Yahoo Finance related content")
+        market_sentiment["sources"].append("东方财富 / GDELT / Yahoo Finance related content")
     asset_type = (market_data.get("asset") or {}).get("type")
     to_session_close = range_name == "1d" and interval == "5m" and market in {"cn", "hk", "us", "etf", "fund"}
     horizon = adaptive_horizon(market, symbol, interval, asset_type)
@@ -127,11 +143,12 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
     flow = None
     if use_ml and market in {"cn", "hk", "us"}:
         try:
-            flow, _flow_meta = daily_flow(market, symbol)
-            live_signal = flow_series_by_index([flow[-1]["date"]], flow)[-1]
-            live_context = {**market_sentiment, "flow": {"zscore": live_signal[0], "trend_3d": live_signal[1]}}
-        except FinanceError as exc:
-            result["warnings"].append(f"Fund-flow features unavailable: {exc.message}")
+            flow = cached_daily_flow(market, symbol)
+            if flow:
+                live_signal = flow_series_by_index([flow[-1]["date"]], flow)[-1]
+                live_context = {**market_sentiment, "flow": {"zscore": live_signal[0], "trend_3d": live_signal[1]}}
+        except (FinanceError, KeyError, ValueError) as exc:
+            result["warnings"].append(f"Cached fund-flow features unavailable: {type(exc).__name__}")
         if market == "cn":
             try:
                 book = order_book_cn(symbol)
@@ -166,7 +183,7 @@ def news_asset(market: str, symbol: str, limit: int = 12) -> dict:
         quote_data = context.get("quote") or {}
         technical = technical_analysis(bars, quote_data.get("price"))
         news["market_sentiment"] = market_sentiment_analysis(bars, quote_data, technical, news.get("sentiment"))
-        news["market_sentiment"]["sources"] = [quote_data.get("source"), "Yahoo Finance historical bars", "GDELT / Yahoo Finance related content"]
+        news["market_sentiment"]["sources"] = [quote_data.get("source"), "Yahoo Finance historical bars", "东方财富 / GDELT / Yahoo Finance related content"]
     if context_warning:
         news.setdefault("warnings", []).append(context_warning)
     return news

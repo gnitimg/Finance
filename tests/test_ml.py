@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.monitoring import ml
-from scripts.finance import align_model_history
+from scripts.finance import align_model_history, latest_market_session
 
 
 def synthetic(count=120):
@@ -21,6 +21,15 @@ def synthetic(count=120):
 
 
 class MLTests(unittest.TestCase):
+    def test_intraday_display_keeps_only_latest_exchange_date(self):
+        bars = [
+            {"time": "2026-09-10T19:55:00Z", "close": 100},
+            {"time": "2026-09-11T13:30:00Z", "close": 101},
+            {"time": "2026-09-11T19:55:00Z", "close": 102},
+        ]
+        latest = latest_market_session(bars, "America/New_York")
+        self.assertEqual([bar["close"] for bar in latest], [101, 102])
+
     def test_extended_context_uses_exact_visible_live_edge(self):
         context = [
             {"time": "2026-09-11T15:50:00Z", "close": 100},
@@ -47,8 +56,8 @@ class MLTests(unittest.TestCase):
                 self.assertEqual(first["next_forecast"]["horizon_label"], "15 分钟")
                 self.assertEqual(len(first["forward_series"]), 4)
                 self.assertTrue(first["path"]["updates_on_new_bar"])
-                self.assertEqual(first["method"], "adaptive_market_ensemble_sentiment_path_v6")
-                self.assertEqual(set(first["ensemble"]["weights"]), {"ridge", "analogue", "trend"})
+                self.assertEqual(first["method"], "adaptive_market_ensemble_sentiment_path_v13")
+                self.assertEqual(set(first["ensemble"]["weights"]), {"ridge", "analogue", "trend", "reversion"})
                 self.assertGreater(first["ensemble"]["return_shrinkage"], 0)
                 self.assertIn("phase_lag_bars", first["evaluation"])
                 self.assertIn("skill_vs_no_change_pct", first["evaluation"])
@@ -58,6 +67,7 @@ class MLTests(unittest.TestCase):
                 self.assertTrue(all("lower" in point and "upper" in point for point in first["forward_series"][1:]))
                 self.assertEqual(first["ensemble"]["state_scope"], "us:TEST:5m")
                 self.assertGreater(first["training"]["base_samples"], 0)
+                self.assertEqual(first["training"]["state_version"], 13)
                 updates = first["training"]["online_updates"]
                 second = ml.forecast(synthetic(), "us", "TEST", "5m", 3)
                 self.assertEqual(second["training"]["online_updates"], updates)
@@ -93,7 +103,7 @@ class MLTests(unittest.TestCase):
         self.assertTrue(path[0]["anchored_once"])
         self.assertFalse(path[1]["anchored_once"])
 
-    def test_recent_downside_reversal_vetoes_stale_bullish_forecast(self):
+    def test_recent_downside_reversal_damps_stale_bullish_forecast(self):
         features = [0.0] * len(ml.FEATURE_NAMES)
         features[0] = -0.03
         features[3] = -0.025
@@ -102,7 +112,15 @@ class MLTests(unittest.TestCase):
         features[16] = -0.04
         guarded, activated = ml._regime_guard(0.05, features, 3, "market")
         self.assertTrue(activated)
-        self.assertLessEqual(guarded, 0)
+        self.assertGreaterEqual(guarded, 0)
+        self.assertLess(guarded, 0.01)
+
+    def test_amplitude_calibration_is_robust_and_never_inverts(self):
+        aligned = ml._return_shrinkage([.01] * 20, [.005] * 19 + [.20], "us_equity")
+        opposite = ml._return_shrinkage([.01] * 20, [-.005] * 20, "us_equity")
+        self.assertGreater(aligned, 0)
+        self.assertLess(aligned, 1)
+        self.assertEqual(opposite, 0)
 
     def test_live_sentiment_changes_forward_context_without_llm(self):
         features = [0.0] * len(ml.FEATURE_NAMES)
@@ -113,6 +131,31 @@ class MLTests(unittest.TestCase):
         self.assertGreater(positive, 0)
         self.assertLess(negative, 0)
         self.assertEqual(metadata["method"], "price_volume_technical_related_content_flow_orderbook")
+
+    def test_standardization_clips_zero_variance_feature_spikes(self):
+        row = ml._vector([10.0, -10.0], [0.0, 0.0], [1e-8, 1e-8])
+        self.assertEqual(row, [1.0, ml.MAX_STANDARD_SCORE, -ml.MAX_STANDARD_SCORE])
+
+    def test_session_path_uses_bounded_direct_model_fits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = ml.DATA_DIR
+            ml.DATA_DIR = Path(directory)
+            try:
+                result = ml.forecast(synthetic(400), "us", "FASTPATH", "5m", 3, to_session_close=True)
+                self.assertLessEqual(result["path"]["direct_model_fits"], ml.PATH_MAX_FITS)
+                self.assertGreater(len(result["forward_series"]), result["path"]["direct_model_fits"])
+                values = {round(point["value"], 8) for point in result["forward_series"]}
+                self.assertGreater(len(values), 3)
+            finally:
+                ml.DATA_DIR = previous
+
+    def test_component_meta_weights_penalize_lagging_high_error_signal(self):
+        errors = {"ridge": .003, "analogue": .018, "trend": .024, "reversion": .009}
+        directions = {"ridge": .72, "analogue": .48, "trend": .31, "reversion": .57}
+        weights = ml._component_weights(errors, "us_equity", directions, baseline_error=.01)
+        self.assertGreater(weights["ridge"], weights["trend"])
+        self.assertGreater(weights["reversion"], weights["trend"])
+        self.assertAlmostEqual(sum(weights.values()), 1.0)
 
     def test_model_refits_when_training_context_grows_materially(self):
         with tempfile.TemporaryDirectory() as directory:

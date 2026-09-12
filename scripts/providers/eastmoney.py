@@ -86,3 +86,9 @@ def daily_flow(market: str, symbol: str, limit: int = 120) -> tuple[list[dict], 
         CACHE.set(_BREAKER_KEY, {"until": time.time() + _COOLDOWN_SECONDS})
         CACHE.set("flow:eastmoney:failures", {"count": 0})
     raise FinanceError("NO_DATA", f"East Money returned no fund flow for {market}:{symbol}", "eastmoney")
+
+
+def cached_daily_flow(market: str, symbol: str, max_age: int = 1800) -> list[dict] | None:
+    """Read optional flow context without delaying an interactive analysis."""
+    cached, _cache_meta = CACHE.get(f"flow:{market}:{symbol}", max_age)
+    return cached

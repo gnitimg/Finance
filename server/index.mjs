@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import express from 'express'
 import compression from 'compression'
 import helmet from 'helmet'
-import { rateLimit } from 'express-rate-limit'
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { compactOverviewData, parseAssetList, PERIODS, publicError, runFinance, validateAsset, validateMonitorThresholds, validatePeriod } from './lib.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -40,7 +40,7 @@ app.use(compression({ filter: (req, res) => req.path === '/api/stream' ? false :
 app.use(express.json({ limit: '20kb' }))
 // Per-visitor quota keyed on the client IP attested by Cloudflare, with a
 // coarser per-edge backstop so direct-to-origin callers cannot rotate keys.
-const visitorKey = (req, res) => req.get('CF-Connecting-IP') || req.ip
+const visitorKey = (req) => ipKeyGenerator(req.get('CF-Connecting-IP') || req.ip)
 app.use('/api', rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: 'draft-8', legacyHeaders: false }))
 app.use('/api', rateLimit({ windowMs: 60_000, limit: 240, standardHeaders: 'draft-8', legacyHeaders: false, keyGenerator: visitorKey }))
 
@@ -48,12 +48,12 @@ const MEMORY_LIMIT = 400
 const memory = new Map()
 const pending = new Map()
 const PERIOD_LIST = [...PERIODS]
-const PREFETCH_ENABLED = (process.env.FINANCE_PREFETCH || 'on') !== 'off'
+const PREFETCH_ENABLED = (process.env.FINANCE_PREFETCH || 'off') === 'on'
 
 // Warming the periods a visitor most likely switches to makes range changes
 // feel instant; it runs only after the served request completes and stays
 // staggered so small instances keep their CPU for live traffic.
-const PREFETCH_PERIODS = ['1d:5m', '3mo:1d', '6mo:1d', '1y:1d']
+const PREFETCH_PERIODS = ['1d:5m', '3mo:1d']
 function prefetchSiblings(market, symbol, currentKey) {
   if (!PREFETCH_ENABLED) return
   let delay = 1500
@@ -62,9 +62,11 @@ function prefetchSiblings(market, symbol, currentKey) {
     const [range, interval] = period.split(':')
     const key = `analyze:${market}:${symbol}:${range}:${interval}`
     if (memory.has(key) || pending.has(key)) continue
-    setTimeout(() => {
-      runFinance(['analyze', '--market', market, '--symbol', symbol, '--range', range, '--interval', interval], { timeoutMs: 25_000 }).catch(() => {})
+    const timer = setTimeout(() => {
+      const ttl = interval === '1d' ? 60_000 : 8_000
+      cached(key, ttl, () => runFinance(['analyze', '--market', market, '--symbol', symbol, '--range', range, '--interval', interval], { timeoutMs: 25_000 })).catch(() => {})
     }, delay)
+    timer.unref()
     delay += 2000
   }
 }
@@ -89,6 +91,17 @@ app.get('/api/quote', async (req, res) => {
   try {
     const { market, symbol } = validateAsset(req.query.market, req.query.symbol)
     const result = await cached(`quote:${market}:${symbol}`, 2000, () => runFinance(['quote', '--market', market, '--symbol', symbol]))
+    res.json(result)
+  } catch (error) { res.status(error.statusCode || 400).json(publicError(error)) }
+})
+
+app.get('/api/snapshot', async (req, res) => {
+  try {
+    const { market, symbol } = validateAsset(req.query.market, req.query.symbol)
+    const period = validatePeriod(req.query.range, req.query.interval)
+    const key = `snapshot:${market}:${symbol}:${period.range}:${period.interval}`
+    const ttl = period.interval === '1d' ? 30_000 : 3_000
+    const result = await cached(key, ttl, () => runFinance(['analyze', '--market', market, '--symbol', symbol, '--range', period.range, '--interval', period.interval, '--no-ml'], { timeoutMs: 12_000 }))
     res.json(result)
   } catch (error) { res.status(error.statusCode || 400).json(publicError(error)) }
 })

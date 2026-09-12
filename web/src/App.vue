@@ -1,12 +1,23 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import * as echarts from 'echarts/core'
-import { BarChart, LineChart } from 'echarts/charts'
-import { DataZoomComponent, GridComponent, LegendComponent, MarkAreaComponent, TooltipComponent } from 'echarts/components'
-import { CanvasRenderer } from 'echarts/renderers'
 import { buildChartData } from './chart-data.js'
 
-echarts.use([BarChart, LineChart, DataZoomComponent, GridComponent, LegendComponent, MarkAreaComponent, TooltipComponent, CanvasRenderer])
+let chartRuntimePromise = null
+function chartRuntime() {
+  if (!chartRuntimePromise) {
+    chartRuntimePromise = Promise.all([
+      import('echarts/core'), import('echarts/charts'), import('echarts/components'), import('echarts/renderers'),
+    ]).then(([core, charts, components, renderers]) => {
+      core.use([
+        charts.BarChart, charts.LineChart, charts.ScatterChart,
+        components.DataZoomComponent, components.GridComponent, components.LegendComponent,
+        components.MarkAreaComponent, components.TooltipComponent, renderers.CanvasRenderer,
+      ])
+      return core
+    })
+  }
+  return chartRuntimePromise
+}
 
 const periods = [
   { label: '1D', range: '1d', interval: '5m' },
@@ -63,7 +74,7 @@ function stored(key, fallback) {
 
 const state = reactive({
   market: 'us', symbol: 'NVDA', period: periods[3], analysis: null,
-  overview: [], health: null, loading: true, live: false, monitoring: false,
+  overview: [], health: null, loading: true, modelLoading: false, live: false, monitoring: false,
   lastSync: null, monitorAt: null, streamRefresh: 5, stablecoin: null, news: null,
 })
 const searchMarket = ref('auto')
@@ -107,6 +118,7 @@ let clockSyncTimer = null
 let toastTimer = null
 let monitorBusy = false
 let quoteBusy = false
+let loadSequence = 0
 let clockOffsetMs = 0
 
 const data = computed(() => state.analysis?.data || {})
@@ -462,11 +474,51 @@ async function loadQuote() {
   finally { quoteBusy = false }
 }
 
+function loadAssetContext(activeKey, assetType) {
+  const [market, symbol] = activeKey.split(':')
+  fetchJson(`/api/news?market=${encodeURIComponent(market)}&symbol=${encodeURIComponent(symbol)}`).then((news) => {
+    if (`${state.market}:${state.symbol}` !== activeKey) return
+    state.news = news.data
+    if (news.data?.market_sentiment && state.analysis?.data) {
+      state.analysis.data.market_sentiment = news.data.market_sentiment
+    }
+  }).catch(() => {})
+  if (assetType === 'stablecoin') {
+    fetchJson(`/api/stablecoin?symbol=${encodeURIComponent(symbol)}`).then((risk) => {
+      if (`${state.market}:${state.symbol}` === activeKey) state.stablecoin = risk.data
+    }).catch(() => {})
+  }
+}
+
 async function loadAsset({ market = state.market, symbol = state.symbol, period = state.period, quiet = false } = {}) {
-  if (!quiet) state.loading = true
+  if (quiet && (state.loading || state.modelLoading)) return
+  const sequence = ++loadSequence
+  const params = new URLSearchParams({ market, symbol, range: period.range, interval: period.interval })
+  if (!quiet) {
+    state.loading = true
+    state.modelLoading = true
+    state.stablecoin = null
+    state.news = null
+    try {
+      const snapshot = await fetchJson(`/api/snapshot?${params}`)
+      if (sequence !== loadSequence) return
+      state.analysis = snapshot
+      state.market = snapshot.data.asset.market
+      state.symbol = snapshot.data.asset.symbol
+      state.period = period
+      state.lastSync = new Date(snapshot.generated_at)
+      searchMarket.value = state.market
+      searchSymbol.value = state.symbol
+      state.loading = false
+      await nextTick()
+      renderChart()
+    } catch {
+      // The complete analysis below remains the authoritative fallback.
+    }
+  }
   try {
-    const params = new URLSearchParams({ market, symbol, range: period.range, interval: period.interval })
     const payload = await fetchJson(`/api/analyze?${params}`)
+    if (sequence !== loadSequence) return
     const displayedQuote = quiet ? state.analysis?.data?.quote : null
     if (displayedQuote && !isFreshQuote(payload.data.quote, displayedQuote)) {
       state.lastSync = new Date(payload.generated_at)
@@ -481,21 +533,6 @@ async function loadAsset({ market = state.market, symbol = state.symbol, period 
       searchMarket.value = state.market
       searchSymbol.value = state.symbol
     }
-    const activeKey = `${state.market}:${state.symbol}`
-    if (!quiet) {
-      state.stablecoin = null
-      state.news = null
-    }
-    if (!quiet) {
-      fetchJson(`/api/news?market=${encodeURIComponent(state.market)}&symbol=${encodeURIComponent(state.symbol)}`).then((news) => {
-        if (`${state.market}:${state.symbol}` === activeKey) state.news = news.data
-      }).catch(() => {})
-    }
-    if (payload.data.asset.type === 'stablecoin') {
-      fetchJson(`/api/stablecoin?symbol=${encodeURIComponent(state.symbol)}`).then((risk) => {
-        if (`${state.market}:${state.symbol}` === activeKey) state.stablecoin = risk.data
-      }).catch(() => {})
-    }
     await nextTick()
     renderChart()
   } catch (error) {
@@ -504,7 +541,15 @@ async function loadAsset({ market = state.market, symbol = state.symbol, period 
       searchSymbol.value = state.symbol
       showToast(friendlyError(error.message))
     }
-  } finally { state.loading = false }
+  } finally {
+    if (sequence === loadSequence) {
+      state.loading = false
+      state.modelLoading = false
+      if (!quiet && state.analysis?.data?.asset) {
+        loadAssetContext(`${state.market}:${state.symbol}`, state.analysis.data.asset.type)
+      }
+    }
+  }
 }
 
 function submitSearch() {
@@ -525,7 +570,9 @@ function selectPeriod(period) {
   loadAsset({ period })
 }
 
-function renderChart() {
+async function renderChart() {
+  if (!chartEl.value || !data.value.history?.length) return
+  const echarts = await chartRuntime()
   if (!chartEl.value || !data.value.history?.length) return
   if (!chart) chart = echarts.init(chartEl.value, null, { renderer: 'canvas' })
   const chartData = buildChartData(data.value.history, forecast.value)
@@ -552,6 +599,7 @@ function renderChart() {
     series: [
       { name: '实际价格', type: 'line', data: chartData.closes, showSymbol: false, smooth: 0.12, lineStyle: { color: '#b8ff5a', width: 2.5 }, areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(184,255,90,.17)' }, { offset: 1, color: 'rgba(184,255,90,0)' }] } }, emphasis: { disabled: true }, z: 4 },
       { name: '滚动前瞻', type: 'line', data: fullForecast.value ? chartData.backtest : [], showSymbol: false, connectNulls: false, lineStyle: { color: '#8070c9', width: 1.5, type: 'dashed', opacity: .72 }, emphasis: { disabled: true }, z: 5 },
+      { name: '方向踏空', type: 'scatter', data: fullForecast.value ? chartData.backtestMisses : [], symbol: 'path://M-6,-6L6,6M6,-6L-6,6', symbolSize: 9, itemStyle: { color: '#ff6b68' }, tooltip: { show: false }, emphasis: { disabled: true }, z: 8 },
       { name: '前瞻区间下界', type: 'line', data: chartData.futureLower, stack: 'forecast-interval', showSymbol: false, connectNulls: true, silent: true, lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 }, emphasis: { disabled: true }, z: 1 },
       { name: '前瞻不确定区间', type: 'line', data: chartData.futureBand, stack: 'forecast-interval', showSymbol: false, connectNulls: true, silent: true, lineStyle: { opacity: 0 }, areaStyle: { color: 'rgba(178,156,255,.18)' }, emphasis: { disabled: true }, z: 1 },
       { name: '未来路径', type: 'line', data: chartData.forward, showSymbol: chartData.future.timestamps.length <= 14, symbol: 'circle', symbolSize: 6, connectNulls: true, clip: false, lineStyle: { color: '#b29cff', width: 2.6, type: 'dashed' }, itemStyle: { color: '#b29cff', borderColor: '#141915', borderWidth: 2 }, label: { show: true, position: 'top', distance: 10, color: '#d4c9ff', fontFamily: 'SFMono-Regular, Consolas, monospace', fontSize: 11, formatter: (item) => item.dataIndex === chartData.axis.length - 1 ? currency(item.value) : '' }, markArea: chartData.future.enabled ? { silent: true, itemStyle: { color: 'rgba(157,134,255,.075)' }, label: { show: true, position: 'insideTop', color: '#b8a8ed', fontSize: 10, formatter: `未来区 · ${chartData.future.horizonLabel}` }, data: [[{ xAxis: chartData.future.startKey }, { xAxis: chartData.future.endKey }]] } : undefined, emphasis: { disabled: true }, z: 7 },
@@ -578,9 +626,9 @@ async function bootstrap() {
   clockSyncTimer = window.setInterval(syncClock, 300_000)
   connectStream()
   loadAsset()
-  loadMonitor({ quiet: false })
-  refreshHealth()
   syncClock()
+  window.setTimeout(() => loadMonitor({ quiet: false }), 3_500)
+  window.setTimeout(refreshHealth, 5_000)
   quoteTimer = window.setInterval(loadQuote, 3_000)
   selectedTimer = window.setInterval(() => loadAsset({ quiet: true }), 10_000)
   monitorTimer = window.setInterval(() => loadMonitor(), 8_000)
@@ -736,11 +784,12 @@ onBeforeUnmount(() => {
         </article>
 
         <article class="panel model-panel">
-          <div class="panel-head"><div><span class="section-index">04</span><h3>前瞻模型</h3></div><span class="python-tag">PYTHON / {{ profileLabel(forecast.ensemble?.profile) }}</span></div>
+          <div class="panel-head"><div><span class="section-index">04</span><h3>前瞻模型</h3></div><span class="python-tag">{{ state.modelLoading ? 'PYTHON / 正在更新' : `PYTHON / ${profileLabel(forecast.ensemble?.profile)}` }}</span></div>
           <div v-if="forecast.next_forecast" class="model-forecast">
             <div><span>预测窗口 · {{ forecast.horizon_label }} · {{ forecastStateLabel() }}</span><strong>{{ currency(forecast.next_forecast.predicted_price) }}</strong><em :class="Number(forecast.next_forecast.predicted_return_pct || 0) >= 0 ? 'positive' : 'negative'">{{ Number(forecast.next_forecast.predicted_return_pct || 0) >= 0 ? '+' : '' }}{{ number(forecast.next_forecast.predicted_return_pct) }}%</em></div>
             <div class="confidence-ring" :title="forecast.confidence?.capped_by_validation ? '未通过样本外验证，分数封顶在 34' : '历史校准质量'" :style="{ '--confidence': `${forecast.confidence?.score || 0}%` }"><strong>{{ number(forecast.confidence?.score, 0) }}</strong><span>/100</span><em v-if="forecast.confidence?.capped_by_validation">封顶</em></div>
           </div>
+          <div v-else-if="state.modelLoading" class="model-unavailable"><span>模型计算中</span><strong>行情已就绪，正在更新前瞻</strong><p>页面无需等待完整回测即可先查看报价与价格轨迹。</p></div>
           <div v-else class="model-unavailable"><span>样本积累中</span><strong>当前数据不足以形成可靠前瞻</strong><p>系统会继续接收实际结果，达到最低校准样本后自动启用。</p></div>
           <div class="model-stats">
             <div><span>校准结论</span><strong :class="forecast.evaluation?.validation_passed === false ? 'negative' : ''">{{ forecast.evaluation?.validation_passed === false ? validationLabel(false) : gradeLabel(forecast.confidence?.grade) }}</strong></div>

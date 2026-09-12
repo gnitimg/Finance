@@ -71,7 +71,7 @@ def analyze(bars: list[dict], quote: dict, technical: dict, news: dict | None = 
         {"key": "price_anomaly", "label": "涨跌异动", "value": current_change, "display": f"{current_change:+.2f}% · Z {change_z:+.2f}", "direction": "positive" if change_z > 0 else "negative" if change_z < 0 else "neutral", "source": quote.get("source")},
         {"key": "volume_confirmation", "label": "量能确认", "value": volume_ratio, "display": f"近 20 日均量的 {volume_ratio:.2f}×" if volume_ratio is not None else "样本不足", "direction": "positive" if volume_ratio is not None and volume_ratio >= 1.2 else "neutral", "source": quote.get("source")},
         {"key": "range_expansion", "label": "振幅扩张", "value": range_ratio, "display": f"常态振幅的 {range_ratio:.2f}×" if range_ratio is not None else "样本不足", "direction": "negative" if range_ratio is not None and range_ratio >= 1.8 else "neutral", "source": quote.get("source")},
-        {"key": "related_news", "label": "关联内容", "value": (news or {}).get("score"), "display": f"{(news or {}).get('article_count', 0)} 条内容 · {(news or {}).get('evidence_count', 0)} 条有效证据", "direction": (news or {}).get("label", "neutral"), "source": "GDELT / Yahoo Finance"},
+        {"key": "related_news", "label": "关联内容", "value": (news or {}).get("score"), "display": f"{(news or {}).get('article_count', 0)} 条内容 · {(news or {}).get('evidence_count', 0)} 条有效证据", "direction": (news or {}).get("label", "neutral"), "source": "东方财富 / GDELT / Yahoo Finance"},
     ]
     data_coverage = sum(value is not None for value in (change_z, volume_ratio, range_ratio, technical.get("score"))) / 4
     news_coverage = min(1.0, float((news or {}).get("source_count") or 0) / 2)

@@ -45,13 +45,27 @@ def _eastmoney(market: str, symbol: str, limit: int) -> list[dict]:
             "summary": None,
         })
     return result
-from . import llm_sentiment, siliconflow
+from . import siliconflow
 from .sentiment import analyze as sentiment_analysis
 
 GDELT_FAILURE_THRESHOLD = 2
 GDELT_COOLDOWN_SECONDS = 600
 _GDELT_STATE = {"consecutive_failures": 0}
 _GDELT_COOLDOWN_KEY = "news:gdelt:cooldown"
+
+
+def _news_cache_key(market: str, symbol: str) -> str:
+    return f"news:{market}:{symbol}"
+
+
+def cached_news(market: str, symbol: str, max_age: int = 900) -> dict | None:
+    """Return exogenous context without starting network work on a quote path."""
+    market, symbol = normalize(market, symbol)
+    cached, cache_meta = CACHE.get(_news_cache_key(market, symbol), max_age)
+    if not cached:
+        return None
+    cached["cache"] = cache_meta
+    return cached
 
 
 def _gdelt_cooldown_until() -> float:
@@ -100,10 +114,11 @@ def get_news(market: str, symbol: str, limit: int = 12, related_name: str | None
     market, symbol = normalize(market, symbol)
     limit = max(1, min(int(limit), 25))
     related_name = (related_name or "").strip()
-    cache_key = f"news:{market}:{symbol}:{related_name}:{limit}"
+    cache_key = _news_cache_key(market, symbol)
     cached, cache_meta = CACHE.get(cache_key, 300)
     if cached:
         cached["cache"] = cache_meta
+        cached["items"] = list(cached.get("items") or [])[:limit]
         return cached
     query_text = f'"{related_name}" OR {symbol}' if related_name and related_name.upper() != symbol else symbol
     providers = {
@@ -130,7 +145,9 @@ def get_news(market: str, symbol: str, limit: int = 12, related_name: str | None
     unique = unique[:limit]
     sentiment = sentiment_analysis(unique, entity=related_name or symbol)
     if unique:
-        scorer = siliconflow if siliconflow.enabled() else llm_sentiment if llm_sentiment.enabled() else None
+        # Routine news scoring stays deterministic.  The optional SiliconFlow
+        # endpoint is a relevance reranker, not a generative analysis call.
+        scorer = siliconflow if siliconflow.enabled() else None
         if scorer is not None:
             try:
                 scores = scorer.score_items(unique)
