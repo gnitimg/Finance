@@ -109,3 +109,37 @@ regime 冲突: 只压幅(50%→8%), 不改方向
 
 - v14（本文档）：原 28 个价量/资金流特征 + 大盘 2 特征 + 板块 3 特征 = 33 维；实时板块热度 0.06 权重；行业 7 天与 K 线 30 分钟缓存；UI 板块卡片（07 区右侧）。
 - v13（上一代）：四组件集成、方向感知权重、中位数振幅校准、240 验证窗、6 锚点路径。
+
+## 10. 结构化风险报表(风险证据面板的后端升级)
+
+风险证据监测(19 类目)原依赖新闻词项匹配 + 资金流,财报类目只能"来源受限"。现接入**东财 datacenter-web 报表 API**(与 push2 不同的主机,免 key,结构化 JSON,实测验证):
+
+| 类目 | 报表 | 结构化字段 | 判定规则(启发式,可调) |
+|---|---|---|---|
+| 股权质押 | `RPT_CSDC_LIST` | PLEDGE_RATIO(质押比例)、TRADE_DATE | ≥30% → detected,否则 covered(no_evidence) |
+| 限售解禁 | `RPT_LIFT_STAGE` | FREE_DATE、FREE_RATIO | 未来 90 天内且比例 ≥1% → detected,否则 covered 并给出下次解禁日期 |
+| 业绩风险 | `RPT_PUBLIC_OP_NEWPREDICT` | PREDICT_TYPE、REPORT_DATE、NOTICE_DATE | 预告类型含 预亏/首亏/续亏/大幅下降/略降/增亏 → detected;预增/扭亏 → covered;**仅保留 400 天内的预告**(旧预测不得覆盖更新的事实) |
+| ST 风险 | 证券简称规则 | 名称含 ST/*ST | 直接 detected |
+
+### 状态机(结构化数据接入后)
+
+```
+结构化命中(detected=true) → detected,证据行 type=structured(带报表数值)
+结构化未命中(detected=false) → covered(no_evidence),附结构化备注(不参与命中计数)
+无结构化数据(限流/未预热) → 回退旧行为:新闻命中 detected,否则 financial_headline 类目 source_limited
+```
+
+**关键不变量**:结构化备注(如"质押比例 25.03%")只是信息披露,**绝不**把类目翻成 detected;detected 只能来自命中规则或新闻/资金流证据。
+
+### 缓存与请求预算
+
+报表 24h 缓存(`dc:{report}:{secucode}`),风险发现整体 10 分钟缓存(`riskreports:{symbol}`);后台训练器在非 A 股时段预热。盘中交互路径**零请求**(只读缓存),与限流完全解耦。
+
+### 情绪与预测的接入
+
+1. 市场情绪新增第五因子"结构化风险"(权重 0.15):`value = −max(0.35, priority/100)`,只在结构化数据存在时渲染;
+2. 预测 live_context 新增 risk 项(权重 0.08):`risk_signal = −clamp(priority/100)`,仅在 detected_count > 0 时生效。
+
+### 未覆盖与后续
+
+减持计划/商誉/审计意见的报表名与字段需按 akshare 公开映射逐个核对(盲目猜测会得到明确的"报表配置不存在"错误,便于排除);巨潮公告检索(orgId 映射)作为独立交叉验证源列为二期。

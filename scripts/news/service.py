@@ -12,6 +12,7 @@ from ..analyzers.company_risk import analyze as company_risk_analysis
 from ..cache import CACHE
 from ..http_client import request_bytes, request_json
 from ..models import FinanceError
+from ..providers.eastmoney import cached_risk_reports
 from ..providers.eastmoney import secid as eastmoney_secid
 from ..symbols import normalize, yahoo_symbol
 
@@ -73,6 +74,7 @@ def cached_news(market: str, symbol: str, max_age: int = 900) -> dict | None:
         entity=symbol,
         news_providers=cached.get("providers_checked"),
         as_of=cached.get("generated_at"),
+        structured=cached_risk_reports(market, symbol),
     )
     return cached
 
@@ -182,6 +184,7 @@ def get_news(market: str, symbol: str, limit: int = 12, related_name: str | None
             entity=related_name or symbol,
             news_providers=stale.get("providers_checked"),
             as_of=stale.get("generated_at"),
+            structured=cached_risk_reports(market, symbol),
         )
         stale["warnings"] = list(stale.get("warnings") or []) + ["Live news sources failed; serving an explicitly stale cache."]
         return stale

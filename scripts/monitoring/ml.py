@@ -463,6 +463,7 @@ def _live_context_return(live_context: dict | None, features: list[float], horiz
     abnormal_signal = abnormal_direction * max(0.0, min(1.0, float(abnormal.get("score") or 0) / 100))
     flow = context.get("flow") or {}
     book = context.get("book") or {}
+    risk = context.get("risk") or {}
     sector = context.get("sector") or {}
     flow_raw = flow.get("zscore")
     flow_signal = max(-1.0, min(1.0, float(flow_raw) / 3.0)) if flow_raw is not None else None
@@ -473,6 +474,10 @@ def _live_context_return(live_context: dict | None, features: list[float], horiz
     sector_signal = None
     if board_now is not None or board_gap is not None:
         sector_signal = max(-1.0, min(1.0, (float(board_now or 0) / 2.0) + (float(board_gap or 0) * 2.0)))
+    risk_detected = risk.get("detected")
+    risk_signal = None
+    if risk_detected:
+        risk_signal = -max(0.3, min(1.0, float(risk.get("priority") or 0) / 100.0))
     # Present-only weighted blend, so a market without order-book or flow
     # coverage falls back to the sentiment/abnormal pair.
     terms = [(score, 0.60), (abnormal_signal, 0.18)]
@@ -482,6 +487,8 @@ def _live_context_return(live_context: dict | None, features: list[float], horiz
         terms.append((book_signal, 0.06))
     if sector_signal is not None:
         terms.append((sector_signal, 0.06))
+    if risk_signal is not None:
+        terms.append((risk_signal, 0.08))
     weight_sum = sum(weight for _value, weight in terms)
     evidence_signal = sum(value * weight for value, weight in terms) / weight_sum
     volatility = max(abs(features[9]), abs(features[0]) * .65, .00035)
@@ -495,6 +502,7 @@ def _live_context_return(live_context: dict | None, features: list[float], horiz
         "flow_signal": None if flow_signal is None else round(flow_signal, 4),
         "book_signal": None if book_signal is None else round(book_signal, 4),
         "sector_signal": None if sector_signal is None else round(sector_signal, 4),
+        "risk_signal": None if risk_signal is None else round(risk_signal, 4),
         "return_contribution_pct": round((math.exp(estimate) - 1) * 100, 5),
         "method": "price_volume_technical_related_content_flow_orderbook_sector",
     }

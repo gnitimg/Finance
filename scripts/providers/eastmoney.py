@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import re
 import time
 
@@ -328,3 +330,95 @@ def sector_context(market: str, symbol: str) -> dict | None:
     context["top_boards"] = directory[:6]
     CACHE.set(cache_key, context)
     return {**context, "cache": {"cached": False, "stale": False, "age_seconds": 0}}
+
+
+_DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_BAD_FORECAST_TYPES = ("预亏", "首亏", "续亏", "大幅下降", "略降", "增亏")
+_GOOD_FORECAST_TYPES = ("预增", "略增", "扭亏", "续盈", "大幅上升")
+
+
+def _datacenter_report(report: str, secucode: str, sort_column: str | None = None) -> list[dict]:
+    cache_key = f"dc:{report}:{secucode}"
+    cached, _meta = CACHE.get(cache_key, 86_400)
+    if cached is not None and isinstance(cached, list):
+        return cached
+    url = f"{_DATACENTER_URL}?reportName={report}&columns=ALL&filter=(SECUCODE%3D%22{secucode}%22)&pageSize=8&source=WEB&client=WEB"
+    if sort_column:
+        url += f"&sortColumns={sort_column}&sortTypes=-1"
+    payload = _fetch_json(url)
+    rows = ((payload.get("result") or {}).get("data")) or []
+    if rows:
+        CACHE.set(cache_key, rows)
+    return rows
+
+
+def risk_reports(market: str, symbol: str, security_name: str | None = None) -> dict | None:
+    """Structured A-share risk findings from East Money datacenter reports.
+
+    Covered here: equity pledge ratio, upcoming lockup expiries, earnings
+    pre-announcements, and the ST name flag. Returns None for non-A-share
+    symbols; individual fetch failures degrade to missing keys.
+    """
+    if market != "cn":
+        return None
+    identifier = secid(market, symbol)
+    if not identifier:
+        return None
+    secucode = f"{symbol}.{'SH' if symbol.startswith(('6', '9', '5')) else 'SZ'}"
+    cache_key = f"riskreports:{symbol}"
+    cached, _meta = CACHE.get(cache_key, 600)
+    if cached is not None and isinstance(cached, dict):
+        return cached
+    findings: dict = {"sources": ["东方财富数据中心"]}
+    try:
+        pledge_rows = _datacenter_report("RPT_CSDC_LIST", secucode, "TRADE_DATE")
+        if pledge_rows:
+            latest = pledge_rows[0]
+            ratio = latest.get("PLEDGE_RATIO")
+            if ratio is not None:
+                findings["equity_pledge"] = {
+                    "detected": float(ratio) >= 30.0,
+                    "detail": f"质押比例 {float(ratio):.2f}%（中登 {str(latest.get('TRADE_DATE'))[:10]}）",
+                }
+    except Exception:
+        pass
+    try:
+        lift_rows = _datacenter_report("RPT_LIFT_STAGE", secucode, "FREE_DATE")
+        upcoming = next((row for row in lift_rows if str(row.get("FREE_DATE", "9"))[:10] >= datetime.now(timezone.utc).date().isoformat()), None)
+        if upcoming and float(upcoming.get("FREE_RATIO") or 0) >= 0.01:
+            findings["lockup_expiry"] = {
+                "detected": False,
+                "detail": f"下次解禁 {str(upcoming.get('FREE_DATE'))[:10]}，占 {float(upcoming['FREE_RATIO']) * 100:.2f}%",
+            }
+    except Exception:
+        pass
+    try:
+        forecast_rows = _datacenter_report("RPT_PUBLIC_OP_NEWPREDICT", secucode, "NOTICE_DATE")
+        forecast_rows = [
+            row for row in forecast_rows
+            if (datetime.now(timezone.utc).date() - datetime.strptime(str(row.get("NOTICE_DATE"))[:10], "%Y-%m-%d").date()).days <= 400
+        ]
+        if forecast_rows:
+            latest = forecast_rows[0]
+            predict_type = str(latest.get("PREDICT_TYPE") or "")
+            report_date = str(latest.get("REPORT_DATE"))[:10]
+            if any(bad in predict_type for bad in _BAD_FORECAST_TYPES):
+                findings["earnings_risk"] = {"detected": True, "detail": f"业绩预告 {predict_type}（{report_date} 报告期）"}
+            elif any(good in predict_type for good in _GOOD_FORECAST_TYPES):
+                findings["earnings_risk"] = {"detected": False, "detail": f"业绩预告 {predict_type}（{report_date} 报告期）"}
+    except Exception:
+        pass
+    name = (security_name or "").upper()
+    if "ST" in name:
+        findings["st_risk"] = {"detected": True, "detail": f"证券简称含风险警示标记（{security_name}）"}
+    CACHE.set(cache_key, findings)
+    return findings
+
+
+def cached_risk_reports(market: str, symbol: str, security_name: str | None = None, max_age: int = 86_400) -> dict | None:
+    """Read-only variant for the interactive analysis path."""
+    identifier = secid(market, symbol)
+    if not identifier or market != "cn":
+        return None
+    cached, _meta = CACHE.get(f"riskreports:{symbol}", max_age)
+    return cached if isinstance(cached, dict) else None

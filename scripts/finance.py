@@ -153,7 +153,7 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
     data_ms = round((time.perf_counter() - data_started) * 1000, 2)
     analysis_started = time.perf_counter()
     technical = technical_analysis(display_history, market_data["quote"].get("price"), interval)
-    market_sentiment = market_sentiment_analysis(display_history, market_data["quote"], technical, (related_content or {}).get("sentiment"))
+    market_sentiment = market_sentiment_analysis(display_history, market_data["quote"], technical, (related_content or {}).get("sentiment"), risk=(related_content or {}).get("company_risk"))
     market_sentiment["sources"] = [market_data["quote"].get("source"), "technical and anomaly engine"]
     if (related_content or {}).get("sentiment", {}).get("evidence_count"):
         market_sentiment["sources"].append("东方财富 / GDELT / Yahoo Finance related content")
@@ -189,6 +189,9 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
                 result["warnings"].append(f"Order-book signal unavailable: {exc.message}")
         if sector_payload:
             live_context = {**live_context, "sector": {"board_change_pct": sector_payload.get("board_change_pct_now"), "board_ma20_gap": sector_payload.get("board_ma20_gap")}}
+        company_risk = (related_content or {}).get("company_risk") or {}
+        if company_risk.get("detected_count"):
+            live_context = {**live_context, "risk": {"priority": company_risk.get("priority_score"), "detected": company_risk.get("detected_count")}}
     market_ref = None
     if sector_payload and interval == "1d" and sector_payload.get("board_code"):
         market_ref = cached_market_reference(sector_payload.get("board_code"))
@@ -230,7 +233,7 @@ def news_asset(market: str, symbol: str, limit: int = 12) -> dict:
         bars = context.get("history") or []
         quote_data = context.get("quote") or {}
         technical = technical_analysis(bars, quote_data.get("price"), "1d")
-        news["market_sentiment"] = market_sentiment_analysis(bars, quote_data, technical, news.get("sentiment"))
+        news["market_sentiment"] = market_sentiment_analysis(bars, quote_data, technical, news.get("sentiment"), risk=news.get("company_risk"))
         news["market_sentiment"]["sources"] = [quote_data.get("source"), "Yahoo Finance historical bars", "东方财富 / GDELT / Yahoo Finance related content"]
     flow = cached_daily_flow(market, symbol) if market in {"cn", "hk", "us"} else None
     news["company_risk"] = company_risk_analysis(

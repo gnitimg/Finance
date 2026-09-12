@@ -7,7 +7,7 @@ def _clamp(value: float, lower: float = -1.0, upper: float = 1.0) -> float:
     return max(lower, min(upper, value))
 
 
-def analyze(bars: list[dict], quote: dict, technical: dict, news: dict | None = None) -> dict:
+def analyze(bars: list[dict], quote: dict, technical: dict, news: dict | None = None, risk: dict | None = None) -> dict:
     valid = [bar for bar in bars if bar.get("close") not in (None, 0)]
     closes = [float(bar["close"]) for bar in valid]
     returns = [closes[index] / closes[index - 1] - 1 for index in range(1, len(closes))]
@@ -44,6 +44,10 @@ def analyze(bars: list[dict], quote: dict, technical: dict, news: dict | None = 
         components.append(("technical_structure", _clamp(float(technical["score"]) / 100), 0.15))
     if news and news.get("evidence_count"):
         components.append(("related_news", _clamp(float(news.get("score") or 0)), 0.20))
+    detected_risks = int((risk or {}).get("detected_count") or 0)
+    if detected_risks:
+        priority = _clamp(float((risk or {}).get("priority_score") or 0) / 100.0)
+        components.append(("structured_risk", -max(0.35, priority), 0.15))
     weight_sum = sum(weight for _, _, weight in components) or 1.0
     score = sum(value * weight for _, value, weight in components) / weight_sum * 100
 
@@ -73,6 +77,14 @@ def analyze(bars: list[dict], quote: dict, technical: dict, news: dict | None = 
         {"key": "range_expansion", "label": "振幅扩张", "value": range_ratio, "display": f"常态振幅的 {range_ratio:.2f}×" if range_ratio is not None else "样本不足", "direction": "negative" if range_ratio is not None and range_ratio >= 1.8 else "neutral", "source": quote.get("source")},
         {"key": "related_news", "label": "关联内容", "value": (news or {}).get("score"), "display": f"{(news or {}).get('article_count', 0)} 条内容 · {(news or {}).get('evidence_count', 0)} 条有效证据", "direction": (news or {}).get("label", "neutral"), "source": "东方财富 / GDELT / Yahoo Finance"},
     ]
+    # Structured risk is a sentiment component only when its data actually
+    # exists; a missing feed must not render as a neutral opinion.
+    if risk is not None:
+        factors.append({
+            "key": "structured_risk", "label": "结构化风险", "value": detected_risks or None,
+            "display": f"{detected_risks} 项命中 · 优先级 {round((risk or {}).get('priority_score') or 0)}" if detected_risks else "结构化报表未命中风险项",
+            "direction": "negative" if detected_risks else "neutral", "source": "东方财富数据中心",
+        })
     data_coverage = sum(value is not None for value in (change_z, volume_ratio, range_ratio, technical.get("score"))) / 4
     news_coverage = min(1.0, float((news or {}).get("source_count") or 0) / 2)
     confidence = 100 * (0.72 * data_coverage + 0.28 * news_coverage)
@@ -86,5 +98,5 @@ def analyze(bars: list[dict], quote: dict, technical: dict, news: dict | None = 
         "metrics": {"change_pct": current_change, "volume_ratio_20d": volume_ratio, "range_ratio_20d": range_ratio},
         "factors": factors,
         "related_evidence": (news or {}).get("evidence", [])[:5],
-        "method": "deterministic_price_volume_range_technical_news_v2",
+        "method": "deterministic_price_volume_range_technical_news_risk_v3",
     }

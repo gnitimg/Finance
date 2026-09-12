@@ -294,11 +294,14 @@ def analyze(
     flow: list[dict] | None = None,
     news_providers: list[str] | None = None,
     as_of: str | None = None,
+    structured: dict | None = None,
 ) -> dict:
     """Screen public evidence without interpreting absence as safety.
 
-    Headline matches are deterministic keyword evidence.  Balance-sheet risks
-    remain explicitly source-limited until a structured filing feed is present.
+    Headline matches are deterministic keyword evidence.  Structured
+    datacenter findings (pledge ratio, lockup schedule, earnings forecast)
+    upgrade balance-sheet categories from source-limited to covered; flagged
+    findings become detected with the reported figure as evidence.
     """
     market = str(market or "").lower()
     applicable = market in {"cn", "hk", "us", "auto", ""}
@@ -309,22 +312,40 @@ def analyze(
     flow_available, flow_hit, flow_meta = _flow_evidence(flow)
     categories = []
 
+    structured_findings = (structured or {}).get("findings") if isinstance(structured, dict) else None
+    structured_available = structured_findings is not None
     for spec in RISK_CATEGORIES:
         evidence = _headline_evidence(items, spec) if applicable and news_available else []
         if spec["key"] == "large_order_outflow" and flow_hit:
             evidence.insert(0, flow_hit)
+        structured_note = None
+        finding = (structured_findings or {}).get(spec["key"])
+        if applicable and finding:
+            # Structured data outranks headline keyword matches for the
+            # categories it actually covers.
+            evidence = [item for item in evidence if item.get("type") == "headline"][:1] if evidence else []
+            if finding.get("detected"):
+                evidence.insert(0, {"type": "structured", "title": finding.get("detail"), "source": "东方财富数据中心"})
+            elif finding.get("detail"):
+                structured_note = {"type": "structured_note", "title": finding.get("detail"), "source": "东方财富数据中心"}
         if not applicable:
             status = "not_applicable"
+        elif finding and finding.get("detected"):
+            status = "detected"
         elif evidence:
             status = "detected"
         elif spec["coverage"] == "flow":
             status = "no_evidence" if flow_available or news_available else "unavailable"
-        elif not news_available:
+        elif not news_available and not structured_available:
             status = "unavailable"
         elif spec["coverage"] == "financial_headline":
-            status = "source_limited"
+            # Structured coverage turns a source-limited category into an
+            # explicit no-evidence verdict; without it the honest label stays.
+            status = "no_evidence" if structured_available and spec["key"] in (structured_findings or {}) else "source_limited"
         else:
             status = "no_evidence"
+        if structured_note:
+            evidence.append(structured_note)
         categories.append({
             "key": spec["key"],
             "label": spec["label"],
@@ -345,6 +366,9 @@ def analyze(
     sources = [{"name": _PROVIDER_LABELS.get(provider.casefold(), provider), "type": "related_headlines"} for provider in providers]
     if flow_available:
         sources.append({"name": "东方财富主力资金流", "type": "fund_flow", "as_of": flow_meta.get("as_of")})
+    if structured_available:
+        for source in (structured or {}).get("sources") or []:
+            sources.append({"name": source, "type": "structured_reports"})
     covered_count = sum(category["status"] in {"detected", "no_evidence"} for category in categories)
     limited_count = sum(category["status"] == "source_limited" for category in categories)
     unavailable_count = sum(category["status"] == "unavailable" for category in categories)
@@ -364,6 +388,6 @@ def analyze(
         "sources": sources,
         "flow": flow_meta,
         "as_of": as_of or generated_at,
-        "method": "deterministic_public_evidence_screen_v1",
-        "disclaimer": "未命中仅表示当前已接入来源没有发现证据，不表示风险不存在；财报类项目在接入结构化公告与报表前属于来源受限。",
+        "method": "deterministic_public_evidence_screen_v2",
+        "disclaimer": "未命中仅表示当前已接入来源没有发现证据，不表示风险不存在；结构化报表已覆盖质押、解禁与业绩预告，其余财报类项目仍局限于来源受限。",
     }

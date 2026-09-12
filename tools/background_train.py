@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.config import read_json
 from scripts.finance import train_models
-from scripts.providers.eastmoney import daily_flow, refresh_flow_today, sector_context
+from scripts.providers.eastmoney import daily_flow, refresh_flow_today, risk_reports, sector_context
 from scripts.symbols import normalize
 
 INTRADAY_ASSETS = 4
@@ -88,6 +88,15 @@ def main() -> int:
                 sector_context(market, symbol)
             except Exception as exc:
                 print(f"[context] {market}:{symbol} sector unavailable: {type(exc).__name__}", flush=True)
+    for item in assets:
+        try:
+            market, symbol = item.split(":", 1) if ":" in item else ("auto", item)
+            market, symbol = normalize(market, symbol)
+            if market == "cn":
+                risk_reports(market, symbol)
+                print(f"[risk] {market}:{symbol} structured findings pre-warmed", flush=True)
+        except Exception as exc:
+            print(f"[risk] {item} {type(exc).__name__}", flush=True)
     daily = train_models(assets, "3mo", "1d")
     summarize(daily, "1d")
     intraday = train_models(assets[:INTRADAY_ASSETS], "1mo", "5m")

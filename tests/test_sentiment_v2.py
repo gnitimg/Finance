@@ -74,3 +74,48 @@ class LLMSentimentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StructuredRiskTests(unittest.TestCase):
+    def test_structured_findings_upgrade_source_limited_categories(self):
+        from scripts.analyzers.company_risk import analyze as risk_analyze
+        structured = {
+            "sources": ["东方财富数据中心"],
+            "findings": {
+                "equity_pledge": {"detected": False, "detail": "质押比例 25.03%（中登 2026-09-11）"},
+                "lockup_expiry": {"detected": False, "detail": "下次解禁 2028-09-26，占 18.87%"},
+            },
+        }
+        result = risk_analyze([], market="cn", entity="600619", structured=structured)
+        by_key = {c["key"]: c for c in result["categories"]}
+        self.assertEqual(by_key["equity_pledge"]["status"], "no_evidence")
+        self.assertEqual(by_key["lockup_expiry"]["status"], "no_evidence")
+        self.assertEqual(by_key["goodwill"]["status"], "source_limited")  # not yet covered
+        self.assertEqual(result["method"], "deterministic_public_evidence_screen_v2")
+
+    def test_structured_flag_becomes_detected_with_evidence(self):
+        from scripts.analyzers.company_risk import analyze as risk_analyze
+        structured = {
+            "findings": {"equity_pledge": {"detected": True, "detail": "质押比例 62.00%（中登 2026-09-11）"}},
+        }
+        result = risk_analyze([], market="cn", entity="600000", structured=structured)
+        by_key = {c["key"]: c for c in result["categories"]}
+        self.assertEqual(by_key["equity_pledge"]["status"], "detected")
+        self.assertEqual(by_key["equity_pledge"]["evidence"][0]["type"], "structured")
+        self.assertGreater(result["priority_score"], 50)
+
+    def test_risk_factor_pulls_sentiment_negative(self):
+        from scripts.analyzers.market_sentiment import analyze as sentiment_analyze
+        bars = [{"close": 10 + i * 0.05, "volume": 1000} for i in range(3)]
+        quote = {"change_pct": 0.2}
+        clean = sentiment_analyze(bars, quote, {"score": 0}, None, risk=None)
+        risky = sentiment_analyze(bars, quote, {"score": 0}, None, risk={"detected_count": 2, "priority_score": 70})
+        self.assertLess(risky["score"], clean["score"])
+        risk_factor = next(f for f in risky["factors"] if f["key"] == "structured_risk")
+        self.assertEqual(risk_factor["direction"], "negative")
+
+    def test_risk_factor_hidden_without_structured_data(self):
+        from scripts.analyzers.market_sentiment import analyze as sentiment_analyze
+        bars = [{"close": 10 + i * 0.05, "volume": 1000} for i in range(3)]
+        result = sentiment_analyze(bars, {"change_pct": 0.2}, {"score": 0}, None, risk=None)
+        self.assertNotIn("structured_risk", [f["key"] for f in result["factors"]])
