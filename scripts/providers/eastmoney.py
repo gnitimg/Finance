@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import re
 import time
@@ -286,6 +286,111 @@ def cached_market_reference(board_code: str | None, max_age: int = SECTOR_KLINE_
     return _enrich_series(board_rows or []), _enrich_series(index_rows or [])
 
 
+
+def _f10_report(report: str, secucode: str, sort_column: str = "REPORT_DATE") -> list[dict]:
+    cache_key = f"f10:{report}:{secucode}"
+    cached, _meta = CACHE.get(cache_key, 86_400)
+    if cached is not None and isinstance(cached, list):
+        return cached
+    url = f"https://datacenter.eastmoney.com/securities/api/data/v1/get?reportName={report}&columns=ALL&filter=(SECUCODE%3D%22{secucode}%22)&pageSize=8&sortColumns={sort_column}&sortTypes=-1&source=HSF10&client=PC"
+    rows = (( _fetch_json(url).get("result") or {}).get("data")) or []
+    if rows:
+        CACHE.set(cache_key, rows)
+    return rows
+
+
+def _financial_findings(secucode: str) -> dict:
+    findings = {}
+    try:
+        main = _f10_report("RPT_F10_FINANCE_MAINFINADATA", secucode)
+    except Exception:
+        main = []
+    balance = []
+    try:
+        balance = _f10_report("RPT_F10_FINANCE_GBALANCE", secucode)
+    except Exception:
+        pass
+    if balance:
+        latest = balance[0]
+        total_assets = float(latest.get("TOTAL_ASSETS") or 0)
+        liabilities = float(latest.get("TOTAL_LIABILITIES") or 0)
+        if total_assets > 0:
+            ratio = liabilities / total_assets
+            findings["financial_distress"] = {
+                "detected": ratio >= 1.0,
+                "detail": f"资产负债率 {ratio * 100:.1f}%（{str(latest.get('REPORT_DATE'))[:10]} 报告期）",
+            }
+            findings["financial_analysis"] = {"detected": False, "detail": f"最新报告期 {str(latest.get('REPORT_DATE'))[:10]} 结构化财务数据已接入"}
+            goodwill = float(latest.get("GOODWILL") or 0)
+            findings["goodwill"] = {
+                "detected": total_assets > 0 and goodwill / total_assets >= 0.15,
+                "detail": f"商誉占净资产比 {goodwill / total_assets * 100:.2f}%" if goodwill else "账面无商誉",
+            }
+            inventory_yoy = float(latest.get("INVENTORY_YOY") or 0)
+            inventory_ratio = float(latest.get("INVENTORY") or 0) / total_assets
+            findings["inventory_impairment"] = {
+                "detected": inventory_yoy >= 60.0 and inventory_ratio >= 0.10,
+                "detail": f"存货同比 {inventory_yoy:+.1f}%，占总资产 {inventory_ratio * 100:.2f}%",
+            }
+            receivable_yoy = float(latest.get("ACCOUNTS_RECE_YOY") or 0)
+            receivable_ratio = float(latest.get("ACCOUNTS_RECE") or 0) / total_assets
+            findings["receivables_bad_debt"] = {
+                "detected": receivable_yoy >= 60.0 and receivable_ratio >= 0.15,
+                "detail": f"应收账款同比 {receivable_yoy:+.1f}%，占总资产 {receivable_ratio * 100:.2f}%",
+            }
+            monetary_ratio = float(latest.get("MONETARYFUNDS") or 0) / total_assets
+            interest_debt = float(latest.get("INTEREST_DEBT_RATIO") or 0)
+            findings["deposit_loan_high"] = {
+                "detected": monetary_ratio >= 0.30 and interest_debt >= 20.0,
+                "detail": f"货币资金占总资产 {monetary_ratio * 100:.1f}%，带息负债率 {interest_debt:.1f}%",
+            }
+    if main:
+        latest_cash = float(main[0].get("NETCASH_OPERATE_PK") or 0)
+        prev_cash = float(main[1].get("NETCASH_OPERATE_PK") or 0) if len(main) > 1 else None
+        profit = float(main[0].get("PARENTNETPROFIT") or 0)
+        divergence = latest_cash < 0 and profit > 0
+        streak = latest_cash < 0 and prev_cash is not None and prev_cash < 0
+        findings["cashflow_interruption"] = {
+            "detected": streak or divergence,
+            "detail": ("经营现金流连续两期为负" if streak else "净利润为正但经营现金流为负") if (streak or divergence) else f"经营现金流为正（净现比 {float(main[0].get('NCO_NETPROFIT') or 0):.2f}）",
+        }
+        profit_yoy = main[0].get("PARENTNETPROFITTZ")
+        if profit_yoy is not None and float(profit_yoy) <= -30.0 and "earnings_risk" not in findings:
+            findings["earnings_risk"] = {"detected": True, "detail": f"归母净利润同比 {float(profit_yoy):+.1f}%（最新报告期）"}
+    return findings
+
+
+def _executive_findings(market: str, symbol: str, secucode: str) -> dict:
+    findings = {}
+    try:
+        rows = _f10_report("RPT_EXECUTIVE_HOLD_CHANGE", secucode, "CHANGE_DATE")
+    except Exception:
+        rows = []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=180)).date()
+    reductions = []
+    for row in rows or []:
+        try:
+            day = datetime.strptime(str(row.get("CHANGE_DATE"))[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if day < cutoff:
+            continue
+        change_num = float(row.get("CHANGE_NUM") or 0)
+        reason = str(row.get("CHANGE_REASON") or "")
+        if change_num < 0 or "减持" in reason:
+            reductions.append((day, row))
+    if reductions:
+        reductions.sort(key=lambda item: item[0], reverse=True)
+        holder = str(reductions[0][1].get("HOLDER_NAME") or reductions[0][1].get("EXECUTIVE_NAME") or "董监高")
+        findings["shareholder_reduction"] = {
+            "detected": True,
+            "detail": f"近 180 天 {len(reductions)} 笔董监高减持记录（最近 {str(reductions[0][1].get('CHANGE_DATE'))[:10]}，{holder}）",
+        }
+    elif rows:
+        findings["shareholder_reduction"] = {"detected": False, "detail": "近 180 天无董监高减持记录"}
+    return findings
+
+
 def sector_context(market: str, symbol: str) -> dict | None:
     """Industry board plus broad-market context for an A-share, fully cached.
 
@@ -409,6 +514,8 @@ def risk_reports(market: str, symbol: str, security_name: str | None = None) -> 
                 findings["earnings_risk"] = {"detected": False, "detail": f"业绩预告 {predict_type}（{report_date} 报告期）"}
     except Exception:
         pass
+    findings.update(_financial_findings(secucode))
+    findings.update(_executive_findings(market, symbol, secucode))
     name = (security_name or "").strip()
     if name:
         # The exchange name alone settles this category in both directions,

@@ -118,8 +118,15 @@ regime 冲突: 只压幅(50%→8%), 不改方向
 |---|---|---|---|
 | 股权质押 | `RPT_CSDC_LIST` | PLEDGE_RATIO(质押比例)、TRADE_DATE | ≥30% → detected,否则 covered(no_evidence) |
 | 限售解禁 | `RPT_LIFT_STAGE` | FREE_DATE、FREE_RATIO | 未来 90 天内且比例 ≥1% → detected,否则 covered 并给出下次解禁日期 |
-| 业绩风险 | `RPT_PUBLIC_OP_NEWPREDICT` | PREDICT_TYPE、REPORT_DATE、NOTICE_DATE | 预告类型含 预亏/首亏/续亏/大幅下降/略降/增亏 → detected;预增/扭亏 → covered;**仅保留 400 天内的预告**(旧预测不得覆盖更新的事实) |
-| ST 风险 | 证券简称规则 | 名称含 ST/*ST | 直接 detected |
+| 业绩风险 | `RPT_PUBLIC_OP_NEWPREDICT` | PREDICT_TYPE、REPORT_DATE、NOTICE_DATE | 预告类型含 预亏/首亏/续亏/大幅下降/略降/增亏 → detected;预增/扭亏 → covered;**仅保留 400 天内的预告**(旧预测不得覆盖更新的事实);另有 F10 归母净利同比 ≤−30% 的交叉判定 |
+| ST 风险 | 证券简称规则 | 名称含 ST/*ST | 双向判定:命中 → detected;干净简称 → covered(该类目无"受限"状态) |
+| 商誉风险 | `RPT_F10_FINANCE_GBALANCE` | GOODWILL、TOTAL_ASSETS | 商誉/总资产 ≥15% → detected,无商誉 → covered |
+| 存货减值 | 同上 | INVENTORY、INVENTORY_YOY | 同比 ≥+60% 且 占总资产 ≥10% → detected |
+| 应收账款坏账 | 同上 | ACCOUNTS_RECE、ACCOUNTS_RECE_YOY | 同比 ≥+60% 且 占总资产 ≥15% → detected |
+| 存贷双高 | 同上 | MONETARYFUNDS、INTEREST_DEBT_RATIO | 货币资金 ≥30% 且 带息负债率 ≥20% → detected |
+| 财务困境 | 同上 | TOTAL_LIABILITIES、TOTAL_ASSETS | 资不抵债(负债率 ≥100%) → detected |
+| 财务分析 | 同上 | 最新报告期标记 | 覆盖标记(covered),无命中态 |
+| 股东减持 | `RPT_EXECUTIVE_HOLD_CHANGE` | CHANGE_NUM、CHANGE_REASON、CHANGE_DATE | 近 180 天存在负变动或含"减持" → detected(口径:董监高;大股东层级二期);排序字段是 CHANGE_DATE 而非 REPORT_DATE |
 
 ### 状态机(结构化数据接入后)
 
@@ -142,4 +149,4 @@ regime 冲突: 只压幅(50%→8%), 不改方向
 
 ### 未覆盖与后续
 
-减持计划/商誉/审计意见的报表名与字段需按 akshare 公开映射逐个核对(盲目猜测会得到明确的"报表配置不存在"错误,便于排除);巨潮公告检索(orgId 映射)作为独立交叉验证源列为二期。
+当前仅剩**审计意见**未覆盖(报表名未核实)。踩坑记录:`data/get?type=` 端点必须显式 columns(不接受 ALL);`data/v1/get` 只认 datacenter 主机上存在的报表;报表排序字段错误会**静默返回空行**而非报错。减持的"大股东"层级(非董监高)与巨潮公告检索(orgId 映射)列为二期;审计意见优先。
