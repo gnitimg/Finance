@@ -106,8 +106,8 @@ const settingsSections = [
   { id: 'forecast', index: '02', label: '预测轨迹' },
   { id: 'watchlist', index: '03', label: '自选与预警' },
   { id: 'health', index: '04', label: '数据源健康' },
-  { id: 'about', index: '05', label: '关于' },
-  { id: 'models', index: '06', label: '模型配置' },
+  { id: 'models', index: '05', label: '模型配置' },
+  { id: 'about', index: '06', label: '关于' },
 ]
 let chart = null
 let stream = null
@@ -137,41 +137,60 @@ const detectedRisks = computed(() => companyRisk.value.detected || [])
 const riskSources = computed(() => (companyRisk.value.sources || []).map((item) => item.name).filter(Boolean).join(' / '))
 const backtestStats = ref({ hits: 0, total: 0 })
 const sectorInfo = computed(() => data.value.sector || null)
-const modelConfig = ref([])
-const modelFormOpen = ref(false)
-const modelForm = reactive({ id: '', name: '', kind: 'chat', base_url: '', model: '', api_key: '', enabled: true })
-const deleteArm = ref('')
-const kindLabels = { chat: '对话', rerank: '重排序', embedding: '嵌入' }
+const modelSlots = ref({ chat: null, rerank: null, embedding: null })
+const modelFormOpen = ref('')
+const modelForms = reactive({ chat: {}, rerank: {}, embedding: {} })
+const modelCatalog = reactive({ chat: [], rerank: [], embedding: [] })
+const modelCatalogBusy = ref('')
+const modelClearArm = ref('')
+const kindLabels = { chat: '对话模型', rerank: '重排序模型', embedding: '嵌入模型（预留）' }
 function kindLabel(kind) { return kindLabels[kind] || kind }
+function slotStatus(kind) {
+  const slot = modelSlots.value[kind]
+  if (!slot || !slot.has_key) return { label: '未配置', tone: 'na' }
+  return slot.enabled ? { label: '运行中', tone: 'running' } : { label: '未启用', tone: 'off' }
+}
 async function fetchModels() {
   try {
     const payload = await fetchJson('/api/models')
-    modelConfig.value = payload.data.models || []
-  } catch { modelConfig.value = [] }
+    modelSlots.value = payload.data.slots || modelSlots.value
+  } catch {}
 }
-function startAddModel() {
-  Object.assign(modelForm, { id: '', name: '', kind: 'chat', base_url: '', model: '', api_key: '', enabled: true })
-  modelFormOpen.value = true
+function editModel(kind) {
+  const slot = modelSlots.value[kind]
+  modelForms[kind] = { base_url: slot?.base_url || '', api_key: '', model: slot?.model || '', enabled: Boolean(slot?.enabled) }
+  modelCatalog[kind] = []
+  modelFormOpen.value = kind
 }
-function editModel(m) {
-  Object.assign(modelForm, { id: m.id, name: m.name, kind: m.kind, base_url: m.base_url, model: m.model, api_key: '', enabled: m.enabled })
-  modelFormOpen.value = true
-}
-async function saveModel() {
+async function loadModelCatalog(kind) {
+  const form = modelForms[kind]
+  if (!form.base_url) return
+  modelCatalogBusy.value = kind
   try {
-    await fetch('/api/models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...modelForm }) })
-    const payload = await fetchJson('/api/models')
-    modelConfig.value = payload.data.models || []
-    modelFormOpen.value = false
+    const params = new URLSearchParams({ base_url: form.base_url, kind })
+    if (form.api_key) params.set('key', form.api_key)
+    const payload = await fetchJson(`/api/models/catalog?${params}`)
+    modelCatalog[kind] = payload.data.models || []
+    if (modelCatalog[kind].length && !modelCatalog[kind].includes(form.model)) form.model = modelCatalog[kind][0]
+  } catch { modelCatalog[kind] = [] }
+  finally { modelCatalogBusy.value = '' }
+}
+async function saveModel(kind) {
+  try {
+    await fetch('/api/models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, ...modelForms[kind] }) })
+    await fetchModels()
+    modelFormOpen.value = ''
     showToast('模型已保存', 'success')
   } catch (error) { showToast(friendlyError(error.message)) }
 }
-async function removeModel(m) {
-  if (deleteArm.value !== m.id) { deleteArm.value = m.id; setTimeout(() => { if (deleteArm.value === m.id) deleteArm.value = '' }, 3000); return }
+async function clearModel(kind) {
+  if (modelClearArm.value !== kind) { modelClearArm.value = kind; setTimeout(() => { if (modelClearArm.value === kind) modelClearArm.value = '' }, 3000); return }
   try {
-    await fetch('/api/models/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: m.id }) })
-    modelConfig.value = modelConfig.value.filter((m2) => m2.id !== m.id)
-    deleteArm.value = ''
+    await fetch('/api/models/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind }) })
+    await fetchModels()
+    modelFormOpen.value = ''
+    modelClearArm.value = ''
+    showToast('已清除配置', 'success')
   } catch (error) { showToast(friendlyError(error.message)) }
 }
 const riskStatusRank = { detected: 0, no_evidence: 1, unavailable: 2, source_limited: 3, not_applicable: 4 }
@@ -1045,31 +1064,40 @@ onBeforeUnmount(() => {
           <p class="health-note">行情源失败时只会在允许的新鲜度窗口内使用缓存，并明确标记；不会用模型补造实时价格。</p>
         </section>
         <section v-show="settingsSection === 'models'" class="settings-block models-settings">
-          <div class="settings-title"><div><span>06</span><h3>模型配置</h3></div><button type="button" class="health-refresh" @click="startAddModel"><i class="ri-add-line"></i>添加模型</button></div>
-          <p class="models-note">配置后立即用于情绪打分与相关分析；未配置时 AI 相关功能保持关闭（已接入的嵌入与重排序除外）。API Key 保存在服务器本地，界面仅显示掩码。</p>
-          <div class="model-rows">
-            <div v-for="m in modelConfig" :key="m.id" class="model-row">
-              <span class="model-kind" :class="m.kind">{{ kindLabel(m.kind) }}</span>
-              <div class="model-meta"><strong>{{ m.name }}</strong><small>{{ m.base_url }} · {{ m.model }}{{ m.enabled ? ' · 启用中' : ' · 已停用' }}</small></div>
-              <div class="model-actions">
-                <button type="button" @click="editModel(m)">编辑</button>
-                <button type="button" class="danger" :class="{ armed: deleteArm === m.id }" @click="removeModel(m)">{{ deleteArm === m.id ? '确认删除' : '删除' }}</button>
+          <div class="settings-title"><div><span>05</span><h3>模型配置</h3></div></div>
+          <div v-for="(label, kind) in kindLabels" :key="kind" class="model-row">
+            <template v-if="modelFormOpen === kind">
+              <div class="model-edit">
+                <label><span>Base URL</span><input v-model="modelForms[kind].base_url" placeholder="https://api.siliconflow.cn/v1" @change="loadModelCatalog(kind)" /></label>
+                <label><span>API Key</span><input v-model="modelForms[kind].api_key" type="password" :placeholder="modelSlots[kind]?.has_key ? '已保存，留空则沿用' : 'sk-...'" /></label>
+                <label><span>模型</span>
+                  <select v-if="modelCatalog[kind].length" v-model="modelForms[kind].model">
+                    <option v-for="id in modelCatalog[kind]" :key="id" :value="id">{{ id }}</option>
+                  </select>
+                  <input v-else v-model="modelForms[kind].model" placeholder="填写或保存后自动拉取模型列表" />
+                </label>
+                <div class="model-toggle"><span>启用</span><input :id="`tg-${kind}`" v-model="modelForms[kind].enabled" type="checkbox" /><label :for="`tg-${kind}`" class="model-switch"><i></i></label></div>
+                <div class="model-form-actions">
+                  <button type="button" @click="loadModelCatalog(kind)">{{ modelCatalogBusy === kind ? '拉取中…' : '拉取模型列表' }}</button>
+                  <button type="button" @click="modelFormOpen = ''">取消</button>
+                  <button type="button" class="primary" @click="saveModel(kind)">保存</button>
+                  <button type="button" class="danger" :class="{ armed: modelClearArm === kind }" @click="clearModel(kind)">{{ modelClearArm === kind ? '确认清除' : '清除' }}</button>
+                </div>
               </div>
-            </div>
-            <p v-if="!modelConfig.length" class="models-empty">尚未配置任何模型。添加对话模型后，新闻情绪打分将自动切换到你的模型；重排序模型可替换默认的 BAAI 重排序。</p>
+            </template>
+            <template v-else>
+              <div class="model-row-head">
+                <strong>{{ label }}</strong>
+                <span class="model-status" :class="slotStatus(kind).tone">{{ slotStatus(kind).label }}</span>
+                <button type="button" class="model-edit-btn" @click="editModel(kind)">编辑</button>
+              </div>
+              <small v-if="modelSlots[kind]" class="model-endpoint">{{ modelSlots[kind].base_url }} · {{ modelSlots[kind].model }}</small>
+            </template>
           </div>
-          <form v-if="modelFormOpen" class="model-form" @submit.prevent="saveModel">
-            <label><span>名称</span><input v-model="modelForm.name" maxlength="40" placeholder="如 我的硅基流动" required /></label>
-            <label><span>类型</span><select v-model="modelForm.kind"><option value="chat">对话模型（情绪打分）</option><option value="rerank">重排序模型</option><option value="embedding">嵌入模型（预留）</option></select></label>
-            <label><span>Base URL</span><input v-model="modelForm.base_url" placeholder="https://api.siliconflow.cn/v1" required /></label>
-            <label><span>模型 ID</span><input v-model="modelForm.model" placeholder="如 BAAI/bge-reranker-v2-m3" required /></label>
-            <label><span>API Key</span><input v-model="modelForm.api_key" type="password" :placeholder="modelForm.id ? '已保存，留空则沿用' : 'sk-...'" /></label>
-            <label class="model-enabled"><span>启用</span><input v-model="modelForm.enabled" type="checkbox" /></label>
-            <div class="model-form-actions"><button type="button" @click="modelFormOpen = false">取消</button><button type="submit" class="primary">保存模型</button></div>
-          </form>
+          <p class="models-note">配置并启用后立即用于情绪打分与相关分析；未配置时 AI 相关功能保持关闭（已接入的嵌入与重排序除外）。</p>
         </section>
         <section v-show="settingsSection === 'about'" class="settings-block about-settings">
-          <div class="settings-title"><div><span>05</span><h3>关于</h3></div></div>
+          <div class="settings-title"><div><span>06</span><h3>关于</h3></div></div>
           <div class="about-list">
             <div><span>开源仓库</span><p>本站为 GNITIMG Finance。确定性 Python 引擎、Node 服务端与前端已开源：<a href="https://github.com/gnitimg/Finance" target="_blank" rel="noopener noreferrer">github.com/gnitimg/Finance</a>。</p></div>
             <div><span>信息保护</span><p>行情获取、指标计算、模型训练与告警全部在本站服务器本地完成；不注册、不收集账号、位置或浏览历史。自选列表、时区与已读状态等偏好仅保存在你的浏览器本地。可选的 L2 语言模型综合默认关闭；如启用，仅传输脱敏后的紧凑市场摘要，发送前自动过滤密钥、手机号、账号与频道标识。</p></div>

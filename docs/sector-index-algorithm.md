@@ -147,6 +147,10 @@ regime 冲突: 只压幅(50%→8%), 不改方向
 1. 市场情绪新增第五因子"结构化风险"(权重 0.15):`value = −max(0.35, priority/100)`,只在结构化数据存在时渲染;
 2. 预测 live_context 新增 risk 项(权重 0.08):`risk_signal = −clamp(priority/100)`,仅在 detected_count > 0 时生效。
 
+### 模型配置(05 设置项)
+
+`data/model_endpoints.json` 按类型(对话/重排序/嵌入)各存一个槽位(Base URL / 模型 ID / API Key / 启用)。服务端 API:`GET /api/models`(Key 掩码)、`POST /api/models`(保存槽位)、`POST /api/models/clear`、`GET /api/models/catalog`(代理 `/models` 列表,自动沿用已存 Key)。启用对话模型 → 接管新闻情绪打分;启用重排序 → 替换默认 BAAI 端点;嵌入槽位为相似新闻检索预留。**未配置时 AI 路径保持关闭**。
+
 ### 未覆盖与后续
 
 **风险等级与配色**:命中类目携带 level(high/medium/low,来源:结构化判定的 level 字段或类目严重度映射),矩阵配色为 高=红、中=土黄、低=深绿、已核验未命中=原色、数据源受限=虚线灰,面板附图例。当前覆盖 18/19(唯一受限:审计意见)。

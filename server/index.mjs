@@ -5,7 +5,7 @@ import express from 'express'
 import compression from 'compression'
 import helmet from 'helmet'
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
-import { compactOverviewData, deleteModelConfig, listModelConfigs, parseAssetList, PERIODS, publicError, runFinance, upsertModelConfig, validateAsset, validateMonitorThresholds, validatePeriod } from './lib.mjs'
+import { compactOverviewData, fetchModelCatalog, clearModelSlot, getModelSlots, parseAssetList, PERIODS, publicError, runFinance, saveModelSlot, validateAsset, validateMonitorThresholds, validatePeriod } from './lib.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = path.join(ROOT, 'web', 'dist')
@@ -157,22 +157,32 @@ app.get('/api/news', async (req, res) => {
 })
 
 app.get('/api/models', (_req, res) => {
-  res.json({ success: true, data: { models: listModelConfigs() } })
+  res.json({ success: true, data: { slots: getModelSlots() } })
 })
 
 app.post('/api/models', express.json({ limit: '20kb' }), (req, res) => {
   try {
-    const result = upsertModelConfig(req.body || {})
-    res.json({ success: true, data: result })
+    const body = req.body || {}
+    saveModelSlot(String(body.kind || ''), body)
+    res.json({ success: true, data: { slots: getModelSlots() } })
   } catch (error) { res.status(error.statusCode || 400).json(publicError(error)) }
 })
 
-app.post('/api/models/delete', express.json({ limit: '20kb' }), (req, res) => {
+app.post('/api/models/clear', express.json({ limit: '20kb' }), (req, res) => {
   try {
-    const removed = deleteModelConfig(String(req.body?.id || ''))
-    if (!removed) throw Object.assign(new Error('模型不存在'), { statusCode: 404 })
-    res.json({ success: true })
+    clearModelSlot(String(req.body?.kind || ''))
+    res.json({ success: true, data: { slots: getModelSlots() } })
   } catch (error) { res.status(error.statusCode || 400).json(publicError(error)) }
+})
+
+app.get('/api/models/catalog', async (req, res) => {
+  try {
+    const base_url = String(req.query.base_url || '')
+    const api_key = String(req.query.key || '')
+    const kind = String(req.query.kind || '')
+    const ids = await fetchModelCatalog(base_url, api_key, kind)
+    res.json({ success: true, data: { models: ids } })
+  } catch (error) { res.status(error.statusCode || 502).json(publicError(error)) }
 })
 
 app.get('/api/time', (_req, res) => {

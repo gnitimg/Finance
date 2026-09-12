@@ -1,3 +1,12 @@
 {
-  "models": []
+  "slots": {
+    "chat": null,
+    "rerank": {
+      "base_url": "https://api.siliconflow.cn/v1",
+      "model": "BAAI/bge-reranker-v2-m3",
+      "api_key": "sk-nwthrzvovrwcdcrtnhzgdxbtncciahlufoehfdfgnusvburt",
+      "enabled": true
+    },
+    "embedding": null
+  }
 }

@@ -120,17 +120,20 @@ export function publicError(error) {
 const MODEL_CONFIG_PATH = path.join(ROOT, 'data', 'model_endpoints.json')
 const MODEL_KINDS = new Set(['chat', 'rerank', 'embedding'])
 
-function readModelConfig() {
+function readModelSlots() {
   try {
     const payload = JSON.parse(fs.readFileSync(MODEL_CONFIG_PATH, 'utf8'))
-    if (payload && Array.isArray(payload.models)) return payload
+    const slots = payload && typeof payload.slots === 'object' ? payload.slots : {}
+    const out = {}
+    for (const kind of MODEL_KINDS) out[kind] = typeof slots[kind] === 'object' && slots[kind] ? slots[kind] : null
+    return out
   } catch {}
-  return { models: [] }
+  return Object.fromEntries([...MODEL_KINDS].map((k) => [k, null]))
 }
 
-function writeModelConfig(payload) {
+function writeModelSlots(slots) {
   fs.mkdirSync(path.dirname(MODEL_CONFIG_PATH), { recursive: true })
-  fs.writeFileSync(MODEL_CONFIG_PATH, JSON.stringify(payload, null, 2), 'utf8')
+  fs.writeFileSync(MODEL_CONFIG_PATH, JSON.stringify({ slots }, null, 2), 'utf8')
 }
 
 function maskKey(key) {
@@ -138,38 +141,59 @@ function maskKey(key) {
   return key.length > 9 ? `${key.slice(0, 4)}****${key.slice(-3)}` : '****'
 }
 
-export function listModelConfigs() {
-  return readModelConfig().models.map((entry) => ({
-    id: entry.id, name: entry.name, kind: entry.kind, base_url: entry.base_url,
-    model: entry.model, enabled: Boolean(entry.enabled), has_key: Boolean(entry.api_key),
-    api_key: maskKey(entry.api_key || ''),
-  }))
+export function getModelSlots() {
+  const slots = readModelSlots()
+  const out = {}
+  for (const kind of MODEL_KINDS) {
+    const slot = slots[kind]
+    out[kind] = slot
+      ? { base_url: slot.base_url, model: slot.model, enabled: Boolean(slot.enabled), has_key: Boolean(slot.api_key), api_key: maskKey(slot.api_key || '') }
+      : null
+  }
+  return out
 }
 
-export function upsertModelConfig(payload = {}) {
-  const name = String(payload.name || '').trim()
-  const kind = String(payload.kind || '')
+export function saveModelSlot(kind, payload = {}) {
+  if (!MODEL_KINDS.has(kind)) throw Object.assign(new Error('模型类型不正确'), { statusCode: 400 })
   const base_url = String(payload.base_url || '').trim().replace(/\/$/, '')
   const model = String(payload.model || '').trim()
-  if (!/^[\w\u4e00-\u9fff -]{1,40}$/.test(name)) throw Object.assign(new Error('模型名称需为 1-40 位中文/字母/数字/下划线'), { statusCode: 400 })
-  if (!MODEL_KINDS.has(kind)) throw Object.assign(new Error('模型类型不正确'), { statusCode: 400 })
+  const api_key = String(payload.api_key || '').trim()
   if (!/^https?:\/\/[\w.-]+(:\d+)?([\w./-]*)?$/.test(base_url)) throw Object.assign(new Error('Base URL 不合法'), { statusCode: 400 })
-  if (!/^[\w./-]{1,80}$/.test(model)) throw Object.assign(new Error('模型 ID 不合法'), { statusCode: 400 })
-  const registry = readModelConfig()
-  const id = String(payload.id || '').trim() || crypto.randomUUID().replace(/-/g, '').slice(0, 12)
-  const existing = registry.models.find((m) => m.id === id)
-  const api_key = String(payload.api_key || '').trim() || (existing ? existing.api_key : '')
-  if (!api_key) throw Object.assign(new Error('API Key 不能为空'), { statusCode: 400 })
-  const entry = { id, name, kind, base_url, model, api_key, enabled: payload.enabled !== false }
-  registry.models = existing ? registry.models.map((m) => (m.id === id ? entry : m)) : [...registry.models, entry]
-  writeModelConfig(registry)
-  return { id }
+  if (!/^[\w./:-]{1,120}$/.test(model)) throw Object.assign(new Error('模型 ID 不合法'), { statusCode: 400 })
+  const slots = readModelSlots()
+  const current = slots[kind]
+  const final_key = api_key || (current ? current.api_key : '')
+  if (!final_key) throw Object.assign(new Error('API Key 不能为空'), { statusCode: 400 })
+  slots[kind] = { base_url, model, api_key: final_key, enabled: payload.enabled !== false }
+  writeModelSlots(slots)
+  return { ok: true }
 }
 
-export function deleteModelConfig(id) {
-  const registry = readModelConfig()
-  const before = registry.models.length
-  registry.models = registry.models.filter((m) => m.id !== id)
-  if (registry.models.length !== before) writeModelConfig(registry)
-  return registry.models.length !== before
+export function clearModelSlot(kind) {
+  if (!MODEL_KINDS.has(kind)) throw Object.assign(new Error('模型类型不正确'), { statusCode: 400 })
+  const slots = readModelSlots()
+  const existed = Boolean(slots[kind])
+  slots[kind] = null
+  writeModelSlots(slots)
+  return existed
+}
+
+export async function fetchModelCatalog(base_url, api_key, kind = null) {
+  const clean = String(base_url || '').trim().replace(/\/$/, '')
+  if (!api_key && kind && MODEL_KINDS.has(kind)) {
+    const slot = readModelSlots()[kind]
+    api_key = slot ? slot.api_key : ''
+  }
+  if (!/^https?:\/\/[\w.-]+(:\d+)?([\w./-]*)?$/.test(clean)) throw Object.assign(new Error('Base URL 不合法'), { statusCode: 400 })
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    const response = await fetch(`${clean}/models`, { headers: { Authorization: `Bearer ${String(api_key || '')}` }, signal: controller.signal })
+    if (!response.ok) throw Object.assign(new Error(`模型列表请求失败 HTTP ${response.status}`), { statusCode: 502 })
+    const payload = await response.json()
+    const ids = (payload.data || payload.models || []).map((m) => (typeof m === 'string' ? m : m.id)).filter(Boolean)
+    return ids.sort()
+  } finally {
+    clearTimeout(timer)
+  }
 }

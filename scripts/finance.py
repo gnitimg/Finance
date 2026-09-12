@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import uuid
@@ -24,6 +25,7 @@ from scripts.analyzers.technical import analyze as technical_analysis
 from scripts.cache import CACHE
 from scripts.config import env_bool, load_dotenv, read_json
 from scripts.models import FinanceError, clean_json, utc_now
+from scripts.http_client import request_json
 from scripts.monitoring.ml import adaptive_horizon, flow_series_by_index, forecast
 from scripts.monitoring.scanner import scan as monitor_scan
 from scripts.news.service import cached_news, get_news
@@ -436,13 +438,34 @@ def health() -> dict:
     started = time.perf_counter()
     result = envelope("health")
     providers = {}
-    for name, market, symbol in [("sina", "cn", "601619"), ("yahoo", "us", "NVDA"), ("coingecko", "crypto", "USDT")]:
+    probes = [
+        ("sina", "cn", "601619"), ("yahoo", "us", "NVDA"), ("coingecko", "crypto", "USDT"),
+        ("coinbase", "crypto", "BTC"), ("eastmoney", "cn", "601619"), ("tencent", "cn", "601619"),
+    ]
+    for name, market, symbol in probes:
         check_started = time.perf_counter()
         try:
             data = quote(market, symbol)
             providers[name] = {"ok": True, "latency_ms": round((time.perf_counter() - check_started) * 1000, 2), "as_of": data["quote"].get("as_of"), "cached": data["cache"].get("cached"), "stale": data["cache"].get("stale")}
         except Exception as exc:
             providers[name] = {"ok": False, "latency_ms": round((time.perf_counter() - check_started) * 1000, 2), "error": str(exc)[:180]}
+    # cninfo / siliconflow: minimal reachable probes with their own hosts
+    for name, fn in (
+        ("cninfo", lambda: __import__("scripts.providers.eastmoney", fromlist=["x"]).cninfo_org_id("嘉泽新能")),
+    ):
+        check_started = time.perf_counter()
+        try:
+            fn()
+            providers[name] = {"ok": True, "latency_ms": round((time.perf_counter() - check_started) * 1000, 2), "as_of": None, "cached": False, "stale": False}
+        except Exception as exc:
+            providers[name] = {"ok": False, "latency_ms": round((time.perf_counter() - check_started) * 1000, 2), "error": str(exc)[:180]}
+    if os.getenv("SILICONFLOW_API_KEY", "").strip():
+        check_started = time.perf_counter()
+        try:
+            payload, _meta = request_json("https://api.siliconflow.cn/v1/models", headers={"Authorization": f"Bearer {os.getenv('SILICONFLOW_API_KEY')}"}, timeout=6, attempts=1)
+            providers["siliconflow"] = {"ok": True, "latency_ms": round((time.perf_counter() - check_started) * 1000, 2), "as_of": None, "cached": False, "stale": False}
+        except Exception as exc:
+            providers["siliconflow"] = {"ok": False, "latency_ms": round((time.perf_counter() - check_started) * 1000, 2), "error": str(exc)[:180]}
     result["data"] = {"engine": "python-deterministic", "python": sys.version.split()[0], "providers": providers, "cache_entries": CACHE.count(), "llm_policy": "L2-only; disabled for quotes, indicators, monitoring, and ML"}
     result["success"] = any(item["ok"] for item in providers.values())
     result["timing"]["total_ms"] = round((time.perf_counter() - started) * 1000, 2)
