@@ -543,6 +543,16 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
             state = None
     profile = instrument_profile(market, symbol, asset_type)
     config = MODEL_PROFILES.get(profile, MODEL_PROFILES["market"])
+    context = live_context or {}
+    cache_fingerprint = json.dumps([
+        str(bars[-1].get("time") or bars[-1].get("timestamp")) if bars else "",
+        round(float(bars[-1]["close"]), 6) if bars and bars[-1].get("close") is not None else None,
+        len(bars), STATE_VERSION, horizon, to_session_close, interval,
+        round(float(context.get("score") or 0) / 5.0),
+        round(float((context.get("abnormal") or {}).get("score") or 0) / 10.0),
+        round(float((context.get("flow") or {}).get("zscore") or 0), 1),
+        round(float((context.get("book") or {}).get("imbalance") or 0), 2),
+    ], ensure_ascii=False)
     valid_state = bool(
         state
         and state.get("version") == STATE_VERSION
@@ -550,6 +560,10 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
         and state.get("horizon_bars") == horizon
         and state.get("profile") == profile
     )
+    if valid_state and isinstance(state.get("last_forecast"), dict) and state["last_forecast"].get("key") == cache_fingerprint:
+        cached_payload = state["last_forecast"].get("payload")
+        if isinstance(cached_payload, dict):
+            return json.loads(json.dumps(cached_payload))
     weights, means, scales = _fit(train, ridge=config["ridge_small"] if len(train) < 40 else config["ridge"])
     if not valid_state:
         state = {
@@ -680,7 +694,7 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
     forward_series = _forward_path(bars, future_times, horizon, raw_next_return if latest_features else 0.0, profile, final_shrinkage, publication_damping, live_context, residual_sigma)
     terminal = forward_series[-1] if forward_series else {"time": bars[-1]["time"], "value": latest_price, "step": 0}
     terminal_return_pct = (float(terminal["value"]) / latest_price - 1) * 100
-    return {
+    result = {
         "status": "ready",
         "method": "adaptive_market_ensemble_sentiment_path_v6",
         "horizon_bars": len(future_times) if to_session_close else horizon,
@@ -697,3 +711,6 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
         "path": {"scope": "session_close" if to_session_close else "fixed_horizon", "points": len(forward_series), "starts_at": bars[-1]["time"], "ends_at": terminal["time"], "updates_on_new_bar": True},
         "disclaimer": "Statistical estimate from historical bars; not a probability, guarantee, or trading instruction.",
     }
+    state["last_forecast"] = {"key": cache_fingerprint, "cached_at": _iso_value(datetime.now(timezone.utc))}
+    model_path.write_text(json.dumps({**state, "last_forecast": {**state["last_forecast"], "payload": result}}, ensure_ascii=False), encoding="utf-8")
+    return result

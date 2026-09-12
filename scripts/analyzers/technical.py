@@ -90,7 +90,25 @@ def analyze(bars: list[dict], current_price: float | None = None) -> dict:
         signals.append({"key": "relative_volume", "direction": direction, "label": f"Relative volume {volume_ratio:.2f}×", "value": volume_ratio})
         facts.append(f"Relative volume {volume_ratio:.3f}x of the prior 20-bar average")
 
-    score = max(-100, min(100, (len(bullish) - len(bearish)) * 25))
+    # Continuous strength scoring: each signal contributes its measured
+    # magnitude instead of a flat +/-25, so the composite score can take any
+    # value in [-100, 100].
+    contributions = []
+    if averages["ma20"]:
+        contributions.append(max(-25.0, min(25.0, gap / 3.0 * 25.0)))
+    if rsi_value is not None:
+        rsi_pull = max(-1.0, min(1.0, (50.0 - rsi_value) / 20.0))
+        # Overbought extremes flip to bearish; oversold to bullish.
+        if rsi_value >= 70:
+            rsi_pull = -min(1.0, (rsi_value - 70) / 15.0 + 0.5)
+        elif rsi_value <= 30:
+            rsi_pull = min(1.0, (30 - rsi_value) / 15.0 + 0.5)
+        contributions.append(rsi_pull * 25.0)
+    atr_scale = atr_value if atr_value else max(abs(price) * 0.002, 1e-9)
+    contributions.append(max(-25.0, min(25.0, macd_histogram / (2.0 * atr_scale) * 25.0)))
+    if volume_ratio is not None and volume_ratio >= 1.2:
+        contributions.append(max(0.0, min(25.0, (volume_ratio - 1.0) / 1.0 * 25.0)) * (1 if macd_histogram >= 0 else -1))
+    score = round(max(-100.0, min(100.0, sum(contributions))), 2)
     if score >= 40: stance = "bullish"
     elif score <= -40: stance = "bearish"
     else: stance = "mixed"

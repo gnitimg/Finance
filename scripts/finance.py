@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.analyzers.position import analyze_position
+from scripts.backtest import run as run_backtest
 from scripts.analyzers.market_sentiment import analyze as market_sentiment_analysis
 from scripts.analyzers.stablecoin import analyze as stablecoin_analysis
 from scripts.analyzers.technical import analyze as technical_analysis
@@ -86,6 +88,14 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
     market_data = history(market, symbol, range_name, interval)
     display_history = market_data.get("history") or []
     ml_history = display_history
+    news_box = {}
+    if use_ml:
+        def _fetch_news():
+            try:
+                news_box["value"] = get_news(market, symbol, 8, (market_data.get("asset") or {}).get("name"))
+            except Exception as exc:  # noqa: BLE001 - degrade to deterministic result
+                news_box["error"] = type(exc).__name__
+        threading.Thread(target=_fetch_news, daemon=True).start()
     ml_context = {"range": range_name, "interval": interval, "bars": len(display_history), "extended": False}
     if use_ml:
         # Intraday keeps the fast 5-day context so monitor scans stay quick; deep
@@ -103,12 +113,9 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
     data_ms = round((time.perf_counter() - data_started) * 1000, 2)
     analysis_started = time.perf_counter()
     technical = technical_analysis(display_history, market_data["quote"].get("price"))
-    related_content = None
-    if use_ml:
-        try:
-            related_content = get_news(market, symbol, 8, (market_data.get("asset") or {}).get("name"))
-        except Exception as exc:
-            result["warnings"].append(f"Related-content sentiment unavailable: {type(exc).__name__}")
+    related_content = news_box.get("value")
+    if news_box.get("error"):
+        result["warnings"].append(f"Related-content sentiment unavailable: {news_box['error']}")
     market_sentiment = market_sentiment_analysis(display_history, market_data["quote"], technical, (related_content or {}).get("sentiment"))
     market_sentiment["sources"] = [market_data["quote"].get("source"), "technical and anomaly engine"]
     if (related_content or {}).get("sentiment", {}).get("evidence_count"):
@@ -371,6 +378,15 @@ def build_parser() -> argparse.ArgumentParser:
     news_cmd.add_argument("--symbol", required=True)
     news_cmd.add_argument("--limit", type=int, default=12)
     pretty(news_cmd)
+    bt_cmd = sub.add_parser("backtest")
+    bt_cmd.add_argument("--market", default="auto")
+    bt_cmd.add_argument("--symbol", required=True)
+    bt_cmd.add_argument("--range", dest="range_name", default="5y")
+    bt_cmd.add_argument("--interval", default="1d")
+    bt_cmd.add_argument("--capital", type=float, default=1_000_000)
+    bt_cmd.add_argument("--threshold", type=float, default=0.01)
+    bt_cmd.add_argument("--no-iterate", action="store_true")
+    pretty(bt_cmd)
     train_cmd = sub.add_parser("train")
     train_cmd.add_argument("--asset", action="append", required=True)
     train_cmd.add_argument("--range", dest="range_name", default="3mo")
@@ -413,6 +429,15 @@ def main() -> int:
             result = monitor_assets(args.asset, args.forecast_pct, args.price_change_pct, args.volume_ratio)
         elif args.command == "train":
             result = train_models(args.asset, args.range_name, args.interval)
+        elif args.command == "backtest":
+            bt_market, bt_symbol = normalize(args.market, args.symbol)
+            bt_data = history(bt_market, bt_symbol, args.range_name, args.interval)
+            bt_result = run_backtest(bt_data.get("history") or [], bt_market, bt_symbol, args.interval, capital=args.capital, threshold=args.threshold, iterate=not args.no_iterate)
+            result = envelope("backtest")
+            result["data"] = {"asset": bt_data.get("asset"), "rules": bt_result}
+            result["warnings"].extend(bt_data.get("warnings") or [])
+            result["routing"] = {"level": "L1", "specialist_requested": False, "specialist_used": False, "reason": "deterministic_backtest", "specialist_model": None}
+            result["timing"]["total_ms"] = round((time.perf_counter() - started) * 1000, 2)
         else:
             result = health()
     except (FinanceError, ValueError) as exc:

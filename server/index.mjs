@@ -5,7 +5,7 @@ import express from 'express'
 import compression from 'compression'
 import helmet from 'helmet'
 import { rateLimit } from 'express-rate-limit'
-import { compactOverviewData, parseAssetList, publicError, runFinance, validateAsset, validateMonitorThresholds, validatePeriod } from './lib.mjs'
+import { compactOverviewData, parseAssetList, PERIODS, publicError, runFinance, validateAsset, validateMonitorThresholds, validatePeriod } from './lib.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = path.join(ROOT, 'web', 'dist')
@@ -47,6 +47,27 @@ app.use('/api', rateLimit({ windowMs: 60_000, limit: 240, standardHeaders: 'draf
 const MEMORY_LIMIT = 400
 const memory = new Map()
 const pending = new Map()
+const PERIOD_LIST = [...PERIODS]
+const PREFETCH_ENABLED = (process.env.FINANCE_PREFETCH || 'on') !== 'off'
+
+// Warming the periods a visitor most likely switches to makes range changes
+// feel instant; it runs only after the served request completes and stays
+// staggered so small instances keep their CPU for live traffic.
+const PREFETCH_PERIODS = ['1d:5m', '3mo:1d', '6mo:1d', '1y:1d']
+function prefetchSiblings(market, symbol, currentKey) {
+  if (!PREFETCH_ENABLED) return
+  let delay = 1500
+  for (const period of PREFETCH_PERIODS) {
+    if (period === currentKey) continue
+    const [range, interval] = period.split(':')
+    const key = `analyze:${market}:${symbol}:${range}:${interval}`
+    if (memory.has(key) || pending.has(key)) continue
+    setTimeout(() => {
+      runFinance(['analyze', '--market', market, '--symbol', symbol, '--range', range, '--interval', interval], { timeoutMs: 25_000 }).catch(() => {})
+    }, delay)
+    delay += 2000
+  }
+}
 async function cached(key, ttlMs, task) {
   const entry = memory.get(key)
   if (entry && Date.now() - entry.at < ttlMs) return entry.value
@@ -79,6 +100,7 @@ app.get('/api/analyze', async (req, res) => {
     const key = `analyze:${market}:${symbol}:${period.range}:${period.interval}`
     const result = await cached(key, period.interval === '1d' ? 60_000 : 8_000, () => runFinance(['analyze', '--market', market, '--symbol', symbol, '--range', period.range, '--interval', period.interval], { timeoutMs: 25_000 }))
     res.json(result)
+    prefetchSiblings(market, symbol, `${period.range}:${period.interval}`)
   } catch (error) { res.status(error.statusCode || 400).json(publicError(error)) }
 })
 
