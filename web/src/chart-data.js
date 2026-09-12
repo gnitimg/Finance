@@ -25,6 +25,30 @@ export function buildChartData(bars = [], forecast = {}) {
   // so the line shows real per-step fit instead of a free-running drift.
   const historicalSource = forecast?.series?.one_shot_predicted || forecast?.series?.predicted || []
   const historicalMap = new Map(historicalSource.map((point) => [point.time, finiteNumber(point.value)]))
+  // Direction audit: a one-step prediction is a hit when its sign matches the
+  // realized move between its origin and its target bar; misses are surfaced
+  // on the chart so the backtest cannot hide behind the price line.
+  const closeIndex = new Map(actualAxis.map((time, index) => [time, index]))
+  const missPoints = []
+  let hitCount = 0
+  let evaluated = 0
+  for (const point of historicalSource) {
+    const predicted = finiteNumber(point.predicted_return)
+    const originIndex = closeIndex.get(point.origin_time)
+    const targetIndex = closeIndex.get(point.time)
+    if (predicted === null || Math.abs(predicted) < 1e-9 || originIndex === undefined || targetIndex === undefined) continue
+    const originClose = closes[originIndex]
+    const targetClose = closes[targetIndex]
+    if (originClose === null || targetClose === null || originClose <= 0) continue
+    evaluated += 1
+    const realized = targetClose / originClose - 1
+    if (Math.sign(realized) === Math.sign(predicted)) {
+      hitCount += 1
+    } else {
+      const missClose = closes[targetIndex]
+      if (missClose !== null) missPoints.push([point.time, missClose])
+    }
+  }
   const backtest = cleanBars.map((bar) => historicalMap.get(bar.time) ?? null)
   const ma20 = rollingMean(closes, 20)
   const next = forecast?.next_forecast
@@ -74,6 +98,8 @@ export function buildChartData(bars = [], forecast = {}) {
     forward,
     futureLower,
     futureBand,
+    backtestMisses: missPoints,
+    backtestStats: { hits: hitCount, total: evaluated },
     future: {
       enabled: hasForward,
       startKey: hasForward ? actualAxis.at(-1) : null,

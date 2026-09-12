@@ -6,10 +6,45 @@ from datetime import datetime, timezone
 from urllib.parse import quote, urlencode
 import xml.etree.ElementTree as ET
 
+import re
+
 from ..cache import CACHE
 from ..http_client import request_bytes, request_json
 from ..models import FinanceError
+from ..providers.eastmoney import secid as eastmoney_secid
 from ..symbols import normalize, yahoo_symbol
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _eastmoney(market: str, symbol: str, limit: int) -> list[dict]:
+    """East Money per-stock news: the only keyless source with real A-share,
+    HK, and US headline coverage in Chinese."""
+    identifier = eastmoney_secid(market, symbol)
+    if not identifier:
+        return []
+    payload, _meta = request_json(
+        f"https://np-listapi.eastmoney.com/comm/web/getListInfo?client=web&mTypeAndCode={identifier}&pageSize={min(limit, 20)}&type=0",
+        headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36", "Referer": "https://quote.eastmoney.com/"},
+        timeout=8,
+        attempts=1,
+    )
+    rows = ((payload.get("data") or {}).get("list")) if isinstance(payload, dict) else None
+    result = []
+    for row in rows or []:
+        title = _TAG_RE.sub("", str(row.get("Art_Title") or "")).strip()
+        url = str(row.get("Art_Url") or row.get("Art_OriginUrl") or "").strip()
+        if not title or not url:
+            continue
+        result.append({
+            "title": title,
+            "url": url,
+            "source": "东方财富",
+            "published_at": row.get("Art_ShowTime"),
+            "language": "中文",
+            "summary": None,
+        })
+    return result
 from . import llm_sentiment, siliconflow
 from .sentiment import analyze as sentiment_analysis
 
@@ -71,9 +106,13 @@ def get_news(market: str, symbol: str, limit: int = 12, related_name: str | None
         cached["cache"] = cache_meta
         return cached
     query_text = f'"{related_name}" OR {symbol}' if related_name and related_name.upper() != symbol else symbol
-    providers = {"gdelt": lambda: _gdelt(query_text, limit), "yahoo": lambda: _yahoo(market, symbol, limit)}
+    providers = {
+        "gdelt": lambda: _gdelt(query_text, limit),
+        "yahoo": lambda: _yahoo(market, symbol, limit),
+        "eastmoney": lambda: _eastmoney(market, symbol, limit),
+    }
     items, failures = [], []
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(task): name for name, task in providers.items()}
         for future in as_completed(futures):
             name = futures[future]

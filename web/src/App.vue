@@ -115,6 +115,7 @@ const quote = computed(() => data.value.quote || {})
 const technical = computed(() => data.value.technical || {})
 const forecast = computed(() => data.value.ml_forecast || {})
 const marketSentiment = computed(() => data.value.market_sentiment || state.news?.market_sentiment || {})
+const backtestStats = ref({ hits: 0, total: 0 })
 const changeClass = computed(() => Number(quote.value.change_pct || 0) >= 0 ? 'positive' : 'negative')
 const openChangePct = computed(() => {
   const open = Number(quote.value.open)
@@ -528,13 +529,14 @@ function renderChart() {
   if (!chartEl.value || !data.value.history?.length) return
   if (!chart) chart = echarts.init(chartEl.value, null, { renderer: 'canvas' })
   const chartData = buildChartData(data.value.history, forecast.value)
+  backtestStats.value = chartData.backtestStats || { hits: 0, total: 0 }
   chart.setOption({
     animationDuration: 450,
     animationDurationUpdate: 320,
     backgroundColor: 'transparent',
     grid: [{ left: 12, right: 14, top: 28, height: '61%', containLabel: true }, { left: 12, right: 14, top: '74%', height: '10%', containLabel: true }],
     tooltip: { trigger: 'axis', backgroundColor: '#111513', borderColor: '#3a443b', padding: [11, 13], textStyle: { color: '#f1f4ec', fontSize: 12 }, axisPointer: { type: 'line', lineStyle: { color: '#7f8b80' } }, formatter: (params) => chartTooltip(params, chartData) },
-    legend: { top: 0, right: 12, itemWidth: 20, itemHeight: 2, textStyle: { color: '#a9b2a8', fontSize: 11 }, data: ['实际价格', ...(fullForecast.value ? ['单步前瞻'] : []), '未来路径', 'MA20'] },
+    legend: { top: 0, right: 12, itemWidth: 20, itemHeight: 2, textStyle: { color: '#a9b2a8', fontSize: 11 }, data: ['实际价格', ...(fullForecast.value ? ['单步前瞻', '方向踏空'] : []), '未来路径', 'MA20'] },
     xAxis: [
       { type: 'category', data: chartData.axis, gridIndex: 0, boundaryGap: false, axisLine: { lineStyle: { color: '#394139' } }, axisTick: { show: false }, axisLabel: { color: '#909990', fontSize: 11, lineHeight: 15, hideOverlap: true, showMaxLabel: true, interval: 'auto', rich: { forecast: { color: '#c9baff', fontWeight: 650, lineHeight: 15 } }, formatter: (value, index) => chartAxisLabel(value, index, chartData) }, splitLine: { show: true, lineStyle: { color: '#1e2520' } } },
       { type: 'category', data: chartData.axis, gridIndex: 1, boundaryGap: false, axisLine: { lineStyle: { color: '#394139' } }, axisTick: { show: false }, axisLabel: { show: false }, splitLine: { show: false } },
@@ -687,7 +689,7 @@ onBeforeUnmount(() => {
           <div class="chart-key">
             <div class="key-items">
               <span><i class="actual-line"></i>实际价格</span>
-              <span v-if="fullForecast"><i class="backtest-line"></i>单步前瞻</span>
+              <span v-if="fullForecast"><i class="backtest-line"></i>单步前瞻<template v-if="backtestStats.total"> · 命中 {{ backtestStats.hits }}/{{ backtestStats.total }}</template></span>
               <span><i class="forward-line"></i>未来路径</span>
               <span><i class="range-box"></i>模型区间</span>
             </div>
@@ -750,7 +752,7 @@ onBeforeUnmount(() => {
             <div><span>实时情绪</span><strong :class="marketSentiment.label">{{ Number(marketSentiment.score || 0) >= 0 ? '+' : '' }}{{ number(marketSentiment.score, 0) }}</strong></div>
             <div><span>训练隔离</span><strong>单标的状态</strong></div>
           </div>
-          <p class="model-disclaimer">{{ fullForecast ? '深紫虚线为单步滚动回测——每个点都以当时实际价为起点只预测一步，用于观察真实拟合度；' : '' }}亮紫路径综合价格、量能、技术结构与关联内容逐步向前计算，半透明区域来自留出样本误差。反转闸门会撤销与最新状态冲突的方向。置信度不是涨跌概率。</p>
+          <p class="model-disclaimer">{{ fullForecast ? '深紫虚线为单步滚动回测——每一步只用该时点之前的数据（5 分钟视图约为此前 105 分钟，日线约为此前 21 个交易日）预测下一根 bar，红叉为方向踏空处；' : '' }}亮紫路径综合价格、量能、技术结构与关联内容逐步向前计算，半透明区域来自留出样本误差。反转闸门会撤销与最新状态冲突的方向。置信度不是涨跌概率。</p>
         </article>
       </section>
 
