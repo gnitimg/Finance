@@ -1,6 +1,11 @@
 {
   "slots": {
-    "chat": null,
+    "chat": {
+      "base_url": "https://api.siliconflow.cn/v1",
+      "model": "deepseek-ai/DeepSeek-V4-Flash",
+      "api_key": "sk-nwthrzvovrwcdcrtnhzgdxbtncciahlufoehfdfgnusvburt",
+      "enabled": true
+    },
     "rerank": {
       "base_url": "https://api.siliconflow.cn/v1",
       "model": "BAAI/bge-reranker-v2-m3",
