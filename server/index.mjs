@@ -156,6 +156,12 @@ app.get('/api/news', async (req, res) => {
   } catch (error) { res.status(error.statusCode || 400).json(publicError(error)) }
 })
 
+function validateInsightInput(body = {}) {
+  const { market, symbol } = validateAsset(body.market, body.symbol)
+  const question = String(body.question || '').slice(0, 200)
+  return { market, symbol, question }
+}
+
 app.get('/api/models', (_req, res) => {
   res.json({ success: true, data: { slots: getModelSlots() } })
 })
@@ -183,6 +189,15 @@ app.get('/api/models/catalog', async (req, res) => {
     const ids = await fetchModelCatalog(base_url, api_key, kind)
     res.json({ success: true, data: { models: ids } })
   } catch (error) { res.status(error.statusCode || 502).json(publicError(error)) }
+})
+
+app.post('/api/insight', express.json({ limit: '20kb' }), async (req, res) => {
+  try {
+    const { market, symbol, question } = validateInsightInput(req.body || {})
+    const key = `insight:${market}:${symbol}`
+    const result = await cached(key, 180_000, () => runFinance(['insight', '--market', market, '--symbol', symbol, '--question', String(question || '')], { timeoutMs: 120_000 }))
+    res.json(result)
+  } catch (error) { res.status(error.statusCode || 400).json(publicError(error)) }
 })
 
 app.get('/api/time', (_req, res) => {

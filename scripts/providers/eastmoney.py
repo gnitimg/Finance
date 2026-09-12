@@ -404,15 +404,13 @@ def _executive_findings(market: str, symbol: str, secucode: str, entity: str | N
         if announcements:
             latest = announcements[0]
             detected = any(term in latest["title"] for term in ("减持", "司法拍卖"))
-            existing = findings.get("shareholder_reduction") or {}
-            if detected or not existing:
-                findings["shareholder_reduction"] = {
-                    "detected": True,
-                    "level": "medium",
-                    "detail": f"最近减持公告：{latest['title']}（{latest['date']}）" + (f"；{existing.get('detail')}" if existing.get("detail") else ""),
-                }
-            elif existing.get("detail"):
-                findings["shareholder_reduction"]["detail"] += f"；公告线索：{latest['title']}（{latest['date']}）"
+            # The announcement itself is the finding; appending the executive
+            # ledger line after it read as a self-contradiction.
+            findings["shareholder_reduction"] = {
+                "detected": detected,
+                "level": "medium",
+                "detail": f"减持相关公告 {len(announcements)} 条，最新：{latest['title']}（{latest['date']}）",
+            }
         try:
             findings.update(cninfo_regulatory_findings(symbol, entity))
         except Exception:

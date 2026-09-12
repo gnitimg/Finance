@@ -26,6 +26,7 @@ from scripts.cache import CACHE
 from scripts.config import env_bool, load_dotenv, read_json
 from scripts.models import FinanceError, clean_json, utc_now
 from scripts.http_client import request_json
+from scripts.insight import generate_insight
 from scripts.monitoring.ml import adaptive_horizon, flow_series_by_index, forecast
 from scripts.monitoring.scanner import scan as monitor_scan
 from scripts.news.service import cached_news, get_news
@@ -510,6 +511,11 @@ def build_parser() -> argparse.ArgumentParser:
     risk_context_cmd.add_argument("--symbol", required=True)
     risk_context_cmd.add_argument("--limit", type=int, default=20)
     pretty(risk_context_cmd)
+    insight_cmd = sub.add_parser("insight")
+    insight_cmd.add_argument("--market", default="auto")
+    insight_cmd.add_argument("--symbol", required=True)
+    insight_cmd.add_argument("--question", default="")
+    pretty(insight_cmd)
     bt_cmd = sub.add_parser("backtest")
     bt_cmd.add_argument("--market", default="auto")
     bt_cmd.add_argument("--symbol", required=True)
@@ -565,8 +571,14 @@ def main() -> int:
             result["routing"] = {"level": "L1", "specialist_requested": False, "specialist_used": False, "reason": "deterministic_background_risk_context", "specialist_model": None}
         elif args.command == "monitor":
             result = monitor_assets(args.asset, args.forecast_pct, args.price_change_pct, args.volume_ratio)
-        elif args.command == "train":
-            result = train_models(args.asset, args.range_name, args.interval)
+        elif args.command == "insight":
+            insight_market, insight_symbol = normalize(args.market, args.symbol)
+            insight = generate_insight(insight_market, insight_symbol, args.question or None)
+            result = envelope("insight")
+            result["data"] = {"asset": {"market": insight_market, "symbol": insight_symbol}, "insight": insight}
+            result["warnings"].append("AI 解读具有不确定性,请谨慎参考;数据来自只读工具调用。")
+            result["routing"] = {"level": "L2", "specialist_requested": True, "specialist_used": True, "reason": "user_model_insight", "specialist_model": insight.get("model")}
+            result["timing"]["total_ms"] = round((time.perf_counter() - started) * 1000, 2)
         elif args.command == "backtest":
             bt_market, bt_symbol = normalize(args.market, args.symbol)
             bt_data = history(bt_market, bt_symbol, args.range_name, args.interval)

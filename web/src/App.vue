@@ -137,6 +137,26 @@ const detectedRisks = computed(() => companyRisk.value.detected || [])
 const riskSources = computed(() => (companyRisk.value.sources || []).map((item) => item.name).filter(Boolean).join(' / '))
 const backtestStats = ref({ hits: 0, total: 0 })
 const sectorInfo = computed(() => data.value.sector || null)
+const insight = ref(null)
+const insightLoading = ref(false)
+const chatReady = ref(false)
+async function refreshChatReady() {
+  try {
+    const payload = await fetchJson('/api/models')
+    chatReady.value = Boolean(payload.data.slots?.chat?.enabled && payload.data.slots?.chat?.has_key)
+  } catch { chatReady.value = false }
+}
+async function generateInsight() {
+  if (insightLoading.value) return
+  insightLoading.value = true
+  try {
+    const payload = await fetch('/api/insight', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ market: state.market, symbol: state.symbol }) })
+    const body = await payload.json()
+    if (!body.success) throw new Error(body.error?.message || 'AI 解读失败')
+    insight.value = body.data.insight
+  } catch (error) { showToast(friendlyError(error.message)) }
+  finally { insightLoading.value = false }
+}
 const modelSlots = ref({ chat: null, rerank: null, embedding: null })
 const modelFormOpen = ref('')
 const modelForms = reactive({ chat: {}, rerank: {}, embedding: {} })
@@ -738,6 +758,7 @@ async function bootstrap() {
   clockTimer = window.setInterval(updateUtcClock, 1_000)
   clockSyncTimer = window.setInterval(syncClock, 300_000)
   connectStream()
+  refreshChatReady()
   loadAsset()
   syncClock()
   window.setTimeout(() => loadMonitor({ quiet: false }), 3_500)
@@ -946,7 +967,6 @@ onBeforeUnmount(() => {
           <div class="provider-list">
             <div v-for="([name, provider]) in providerSummary" :key="name"><i :class="{ ok: provider.ok }"></i><span>{{ name }}</span><strong>{{ provider.ok ? 'ONLINE' : 'DEGRADED' }}</strong><em>{{ number(provider.latency_ms, 0) }} ms</em></div>
           </div>
-          <div class="engine-rule"><span>执行原则</span><p>报价、指标、监测、模型训练全程 Python。只有明确的深度综合请求才允许进入可选 L2 推理。</p></div>
         </aside>
       </section>
 
@@ -986,7 +1006,7 @@ onBeforeUnmount(() => {
         </div>
         <section v-if="companyRisk.applicable !== false && asset.market" class="risk-console" aria-labelledby="risk-console-title">
           <header class="risk-head">
-            <div><span>PUBLIC RISK EVIDENCE</span><h4 id="risk-console-title">风险证据监测</h4><p>公开消息、监管事件与资金流线索；财报类项目会单独标记来源覆盖。</p></div>
+            <div><span>PUBLIC RISK EVIDENCE</span><h4 id="risk-console-title">风险证据监测</h4></div>
             <div class="risk-score">
               <span>证据优先级</span><strong :class="detectedRisks.length ? 'negative' : ''">{{ number(companyRisk.priority_score, 0) }}</strong><em>/100 · 非发生概率</em>
               <button type="button" class="info-mark" aria-label="查看风险监测说明">i
@@ -1009,6 +1029,21 @@ onBeforeUnmount(() => {
             <div v-for="risk in sortedRiskCategories" :key="risk.key" :class="[risk.status, risk.level ? `level-${risk.level}` : '']" :title="`${risk.description}${risk.level ? '（' + ({ high: '高风险', medium: '中风险', low: '低风险' })[risk.level] + '）' : ''}`"><span>{{ risk.label }}</span></div>
           </div>
         </section>
+        <div v-if="chatReady" class="insight-card">
+          <div class="insight-head">
+            <span class="insight-badge">AI 解读</span>
+            <p v-if="!insight && !insightLoading">基于已配置的对话模型与 finance skill 只读数据生成，供参考。</p>
+            <em v-if="insight?.model">{{ insight.model }} · 工具调用 {{ (insight.tools_used || []).join(' / ') || '无' }}</em>
+          </div>
+          <template v-if="insight">
+            <h4>{{ insight.headline }}</h4>
+            <p class="insight-reading">{{ insight.reading }}</p>
+            <ul v-if="insight.risks?.length" class="insight-risks"><li v-for="risk in insight.risks" :key="risk">{{ risk }}</li></ul>
+            <small v-if="insight.uncertainty">主要不确定性：{{ insight.uncertainty }}</small>
+          </template>
+          <button v-else type="button" class="insight-go" :disabled="insightLoading" @click="generateInsight">{{ insightLoading ? '生成中…' : '生成 AI 解读' }}</button>
+          <p class="insight-disclaimer">本节内容由大语言模型生成，具有不确定性，请谨慎参考；数据来自 finance skill 只读接口。</p>
+        </div>
         <div v-if="state.news?.items?.length" class="news-list">
           <a v-for="item in state.news.items.slice(0, 6)" :key="item.url || item.title" :href="safeUrl(item.url)" target="_blank" rel="noopener noreferrer">
             <span>{{ item.source }}</span><h4>{{ item.title }}</h4><em>{{ item.published_at || '时间未提供' }} ↗</em>

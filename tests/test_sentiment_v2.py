@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.cache import Cache
+import scripts.model_registry as model_registry
 from scripts.news import llm_sentiment
 from scripts.news.sentiment import analyze
 
@@ -33,11 +34,14 @@ class LexiconV2Tests(unittest.TestCase):
 
 class LLMSentimentTests(unittest.TestCase):
     def setUp(self):
+        self._registry_dir = tempfile.TemporaryDirectory()
+        model_registry.CONFIG_PATH = Path(self._registry_dir.name) / 'model_endpoints.json'
         self._previous_cache = llm_sentiment.CACHE
         self._directory = tempfile.TemporaryDirectory()
         llm_sentiment.CACHE = Cache(Path(self._directory.name) / "cache.sqlite3")
 
     def tearDown(self):
+        model_registry.CONFIG_PATH = Path.home() / '.hermes' / '.env'  # restored below
         llm_sentiment.CACHE = self._previous_cache
         self._directory.cleanup()
 

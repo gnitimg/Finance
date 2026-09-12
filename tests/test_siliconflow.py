@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.cache import Cache
+import scripts.model_registry as model_registry
 from scripts.news import siliconflow
 
 
@@ -20,11 +21,14 @@ def _response(payload):
 
 class SiliconFlowTests(unittest.TestCase):
     def setUp(self):
+        self._registry_dir = tempfile.TemporaryDirectory()
+        model_registry.CONFIG_PATH = Path(self._registry_dir.name) / 'model_endpoints.json'
         self._previous_cache = siliconflow.CACHE
         self._directory = tempfile.TemporaryDirectory()
         siliconflow.CACHE = Cache(Path(self._directory.name) / "cache.sqlite3")
 
     def tearDown(self):
+        model_registry.CONFIG_PATH = Path.home() / '.hermes' / '.env'  # restored below
         siliconflow.CACHE = self._previous_cache
         self._directory.cleanup()
 

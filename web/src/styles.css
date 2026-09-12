@@ -635,3 +635,17 @@ footer > p { text-align: center; }
   .settings-nav button { grid-template-columns: auto; flex: none; padding: 8px 10px; }
   .settings-nav button em { display: none; }
 }
+
+.insight-card { margin-top: 18px; padding: 16px 18px; border: 1px solid rgba(178,156,255,.35); background: rgba(178,156,255,.045); display: grid; gap: 10px; }
+.insight-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.insight-badge { padding: 3px 9px; border: 1px solid rgba(178,156,255,.5); color: var(--violet); font-size: 10px; letter-spacing: .08em; }
+.insight-head p { margin: 0; color: var(--dim); font-size: 11px; }
+.insight-head em { color: var(--dim); font-size: 10px; font-style: normal; margin-left: auto; }
+.insight-card h4 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 17px; font-weight: 450; color: var(--paper); }
+.insight-reading { margin: 0; color: #b9c2b6; font-size: 12.5px; line-height: 1.8; }
+.insight-risks { margin: 0; padding-left: 16px; color: var(--muted); font-size: 11.5px; line-height: 1.8; }
+.insight-card small { color: var(--dim); font-size: 10.5px; }
+.insight-go { justify-self: start; padding: 8px 14px; border: 1px solid rgba(178,156,255,.5); color: var(--violet); background: transparent; cursor: pointer; font-size: 12px; }
+.insight-go:hover { background: rgba(178,156,255,.12); }
+.insight-go:disabled { opacity: .55; cursor: wait; }
+.insight-disclaimer { margin: 4px 0 0; padding-top: 8px; border-top: 1px dashed var(--line-soft); color: #9aa39a; font-size: 10px; line-height: 1.6; }
