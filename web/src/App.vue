@@ -37,7 +37,7 @@ const marketOptions = [
   { value: 'fund', code: 'FUND', label: '基金' },
   { value: 'future', code: 'FUT', label: '期货' },
   { value: 'metal', code: 'METAL', label: '金银商品' },
-  { value: 'crypto', code: '24/7', label: '数字资产' },
+  { value: 'crypto', code: 'Crypto', label: '数字资产' },
 ]
 
 const monitorCategories = [
