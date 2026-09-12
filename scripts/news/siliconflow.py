@@ -102,4 +102,4 @@ def apply(sentiment: dict, items: list[dict], rerank_scores: dict[str, float]) -
     """Blend reranker per-article scores with the lexicon aggregate (0.6 / 0.4)."""
     from . import llm_sentiment
 
-    return llm_sentiment.apply(sentiment, items, rerank_scores)
+    return llm_sentiment.apply(sentiment, items, rerank_scores, method="lexicon_v2+rerank")

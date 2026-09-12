@@ -137,8 +137,8 @@ def score_items(items: list[dict]) -> dict[str, float]:
     return scores
 
 
-def apply(sentiment: dict, items: list[dict], llm_scores: dict[str, float]) -> dict:
-    """Blend LLM per-article scores with the lexicon aggregate (0.6 / 0.4)."""
+def apply(sentiment: dict, items: list[dict], llm_scores: dict[str, float], method: str = "lexicon_v2+llm") -> dict:
+    """Blend model per-article scores with the lexicon aggregate (0.6 / 0.4)."""
     if not llm_scores:
         return sentiment
     title_to_url = {}
@@ -167,5 +167,5 @@ def apply(sentiment: dict, items: list[dict], llm_scores: dict[str, float]) -> d
         "label": label,
         "evidence": adjusted,
         "llm_scored": llm_used,
-        "method": "lexicon_v2+llm",
+        "method": method,
     }
