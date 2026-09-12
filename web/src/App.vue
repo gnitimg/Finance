@@ -107,6 +107,7 @@ const settingsSections = [
   { id: 'watchlist', index: '03', label: '自选与预警' },
   { id: 'health', index: '04', label: '数据源健康' },
   { id: 'about', index: '05', label: '关于' },
+  { id: 'models', index: '06', label: '模型配置' },
 ]
 let chart = null
 let stream = null
@@ -136,6 +137,43 @@ const detectedRisks = computed(() => companyRisk.value.detected || [])
 const riskSources = computed(() => (companyRisk.value.sources || []).map((item) => item.name).filter(Boolean).join(' / '))
 const backtestStats = ref({ hits: 0, total: 0 })
 const sectorInfo = computed(() => data.value.sector || null)
+const modelConfig = ref([])
+const modelFormOpen = ref(false)
+const modelForm = reactive({ id: '', name: '', kind: 'chat', base_url: '', model: '', api_key: '', enabled: true })
+const deleteArm = ref('')
+const kindLabels = { chat: '对话', rerank: '重排序', embedding: '嵌入' }
+function kindLabel(kind) { return kindLabels[kind] || kind }
+async function fetchModels() {
+  try {
+    const payload = await fetchJson('/api/models')
+    modelConfig.value = payload.data.models || []
+  } catch { modelConfig.value = [] }
+}
+function startAddModel() {
+  Object.assign(modelForm, { id: '', name: '', kind: 'chat', base_url: '', model: '', api_key: '', enabled: true })
+  modelFormOpen.value = true
+}
+function editModel(m) {
+  Object.assign(modelForm, { id: m.id, name: m.name, kind: m.kind, base_url: m.base_url, model: m.model, api_key: '', enabled: m.enabled })
+  modelFormOpen.value = true
+}
+async function saveModel() {
+  try {
+    await fetch('/api/models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...modelForm }) })
+    const payload = await fetchJson('/api/models')
+    modelConfig.value = payload.data.models || []
+    modelFormOpen.value = false
+    showToast('模型已保存', 'success')
+  } catch (error) { showToast(friendlyError(error.message)) }
+}
+async function removeModel(m) {
+  if (deleteArm.value !== m.id) { deleteArm.value = m.id; setTimeout(() => { if (deleteArm.value === m.id) deleteArm.value = '' }, 3000); return }
+  try {
+    await fetch('/api/models/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: m.id }) })
+    modelConfig.value = modelConfig.value.filter((m2) => m2.id !== m.id)
+    deleteArm.value = ''
+  } catch (error) { showToast(friendlyError(error.message)) }
+}
 const riskStatusRank = { detected: 0, no_evidence: 1, unavailable: 2, source_limited: 3, not_applicable: 4 }
 const sortedRiskCategories = computed(() => {
   const categories = companyRisk.value?.categories || []
@@ -409,6 +447,7 @@ function openWatchlistEditor() {
   draftSymbol.value = ''
   watchlistOpen.value = true
   refreshHealth()
+  fetchModels()
 }
 function toggleDraftCategory(item, category) {
   item.categories = item.categories.includes(category) ? item.categories.filter((value) => value !== category) : [...item.categories, category]
@@ -927,8 +966,9 @@ onBeforeUnmount(() => {
               </template>
             </article>
           </div>
+          <div class="risk-legend"><i class="lg high"></i>高风险<i class="lg medium"></i>中风险<i class="lg low"></i>低风险<i class="lg ok"></i>已核验未命中<i class="lg na"></i>数据源受限</div>
           <div class="risk-matrix" aria-label="风险监测类别及覆盖状态">
-            <div v-for="risk in sortedRiskCategories" :key="risk.key" :class="risk.status" :title="risk.description"><span>{{ risk.label }}</span></div>
+            <div v-for="risk in sortedRiskCategories" :key="risk.key" :class="[risk.status, risk.level ? `level-${risk.level}` : '']" :title="`${risk.description}${risk.level ? '（' + ({ high: '高风险', medium: '中风险', low: '低风险' })[risk.level] + '）' : ''}`"><span>{{ risk.label }}</span></div>
           </div>
         </section>
         <div v-if="state.news?.items?.length" class="news-list">
@@ -1003,6 +1043,30 @@ onBeforeUnmount(() => {
             <p v-if="!providerSummary.length">正在检测数据源…</p>
           </div>
           <p class="health-note">行情源失败时只会在允许的新鲜度窗口内使用缓存，并明确标记；不会用模型补造实时价格。</p>
+        </section>
+        <section v-show="settingsSection === 'models'" class="settings-block models-settings">
+          <div class="settings-title"><div><span>06</span><h3>模型配置</h3></div><button type="button" class="health-refresh" @click="startAddModel"><i class="ri-add-line"></i>添加模型</button></div>
+          <p class="models-note">配置后立即用于情绪打分与相关分析；未配置时 AI 相关功能保持关闭（已接入的嵌入与重排序除外）。API Key 保存在服务器本地，界面仅显示掩码。</p>
+          <div class="model-rows">
+            <div v-for="m in modelConfig" :key="m.id" class="model-row">
+              <span class="model-kind" :class="m.kind">{{ kindLabel(m.kind) }}</span>
+              <div class="model-meta"><strong>{{ m.name }}</strong><small>{{ m.base_url }} · {{ m.model }}{{ m.enabled ? ' · 启用中' : ' · 已停用' }}</small></div>
+              <div class="model-actions">
+                <button type="button" @click="editModel(m)">编辑</button>
+                <button type="button" class="danger" :class="{ armed: deleteArm === m.id }" @click="removeModel(m)">{{ deleteArm === m.id ? '确认删除' : '删除' }}</button>
+              </div>
+            </div>
+            <p v-if="!modelConfig.length" class="models-empty">尚未配置任何模型。添加对话模型后，新闻情绪打分将自动切换到你的模型；重排序模型可替换默认的 BAAI 重排序。</p>
+          </div>
+          <form v-if="modelFormOpen" class="model-form" @submit.prevent="saveModel">
+            <label><span>名称</span><input v-model="modelForm.name" maxlength="40" placeholder="如 我的硅基流动" required /></label>
+            <label><span>类型</span><select v-model="modelForm.kind"><option value="chat">对话模型（情绪打分）</option><option value="rerank">重排序模型</option><option value="embedding">嵌入模型（预留）</option></select></label>
+            <label><span>Base URL</span><input v-model="modelForm.base_url" placeholder="https://api.siliconflow.cn/v1" required /></label>
+            <label><span>模型 ID</span><input v-model="modelForm.model" placeholder="如 BAAI/bge-reranker-v2-m3" required /></label>
+            <label><span>API Key</span><input v-model="modelForm.api_key" type="password" :placeholder="modelForm.id ? '已保存，留空则沿用' : 'sk-...'" /></label>
+            <label class="model-enabled"><span>启用</span><input v-model="modelForm.enabled" type="checkbox" /></label>
+            <div class="model-form-actions"><button type="button" @click="modelFormOpen = false">取消</button><button type="submit" class="primary">保存模型</button></div>
+          </form>
         </section>
         <section v-show="settingsSection === 'about'" class="settings-block about-settings">
           <div class="settings-title"><div><span>05</span><h3>关于</h3></div></div>

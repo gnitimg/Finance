@@ -346,6 +346,10 @@ def analyze(
             status = "no_evidence"
         if structured_note:
             evidence.append(structured_note)
+        severity_to_level = {"high": "high", "medium": "medium", "info": "low"}
+        level = None
+        if status == "detected":
+            level = (finding or {}).get("level") or severity_to_level.get(spec["severity"], "medium")
         categories.append({
             "key": spec["key"],
             "label": spec["label"],
@@ -353,6 +357,7 @@ def analyze(
             "severity": spec["severity"],
             "coverage": spec["coverage"],
             "status": status,
+            "level": level,
             "evidence_count": len(evidence),
             "evidence": evidence,
         })

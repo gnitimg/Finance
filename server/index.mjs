@@ -5,7 +5,7 @@ import express from 'express'
 import compression from 'compression'
 import helmet from 'helmet'
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
-import { compactOverviewData, parseAssetList, PERIODS, publicError, runFinance, validateAsset, validateMonitorThresholds, validatePeriod } from './lib.mjs'
+import { compactOverviewData, deleteModelConfig, listModelConfigs, parseAssetList, PERIODS, publicError, runFinance, upsertModelConfig, validateAsset, validateMonitorThresholds, validatePeriod } from './lib.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = path.join(ROOT, 'web', 'dist')
@@ -153,6 +153,25 @@ app.get('/api/news', async (req, res) => {
     const { market, symbol } = validateAsset(req.query.market, req.query.symbol)
     const result = await cached(`news:${market}:${symbol}`, 45_000, () => runFinance(['news', '--market', market, '--symbol', symbol, '--limit', '10'], { timeoutMs: 25_000 }))
     res.json(result)
+  } catch (error) { res.status(error.statusCode || 400).json(publicError(error)) }
+})
+
+app.get('/api/models', (_req, res) => {
+  res.json({ success: true, data: { models: listModelConfigs() } })
+})
+
+app.post('/api/models', express.json({ limit: '20kb' }), (req, res) => {
+  try {
+    const result = upsertModelConfig(req.body || {})
+    res.json({ success: true, data: result })
+  } catch (error) { res.status(error.statusCode || 400).json(publicError(error)) }
+})
+
+app.post('/api/models/delete', express.json({ limit: '20kb' }), (req, res) => {
+  try {
+    const removed = deleteModelConfig(String(req.body?.id || ''))
+    if (!removed) throw Object.assign(new Error('模型不存在'), { statusCode: 404 })
+    res.json({ success: true })
   } catch (error) { res.status(error.statusCode || 400).json(publicError(error)) }
 })
 

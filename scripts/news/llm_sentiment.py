@@ -10,6 +10,7 @@ from ..cache import CACHE
 from ..config import env_bool, read_json
 from ..http_client import request_json
 from ..models import FinanceError
+from ..model_registry import enabled_model
 
 SYSTEM_PROMPT = (
     "You are a financial news sentiment scorer. For each headline, judge the "
@@ -26,7 +27,13 @@ _FAILURES_KEY = "news:llm:failures"
 
 
 def enabled() -> bool:
-    return env_bool("FINANCE_SENTIMENT_LLM_ENABLED", False)
+    # Explicit env switch, or any enabled user chat model in the registry.
+    if env_bool("FINANCE_SENTIMENT_LLM_ENABLED", False):
+        return True
+    try:
+        return enabled_model("chat") is not None
+    except Exception:
+        return False
 
 
 def _cooldown_until() -> float:
@@ -35,6 +42,10 @@ def _cooldown_until() -> float:
 
 
 def _provider_policy() -> tuple[str, str, str]:
+    # A user-configured chat model (settings pane) outranks the allowlist.
+    custom = enabled_model("chat")
+    if custom:
+        return f"{str(custom['base_url']).rstrip('/')}/chat/completions", str(custom["model"]), str(custom["api_key"])
     provider = os.getenv("FINANCE_SENTIMENT_LLM_PROVIDER", "opencode_zen").strip()
     policy = read_json("model-policy.json").get("providers", {}).get(provider)
     if not policy:

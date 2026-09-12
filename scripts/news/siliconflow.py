@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from ..cache import CACHE
 from ..config import env_bool
 from ..models import FinanceError
+from ..model_registry import enabled_model
 
 RERANK_URL = "https://api.siliconflow.cn/v1/rerank"
 RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
@@ -26,6 +27,8 @@ _FAILURES_KEY = "news:siliconflow:failures"
 
 
 def enabled() -> bool:
+    if enabled_model("rerank"):
+        return True
     return env_bool("FINANCE_SENTIMENT_SILICONFLOW_ENABLED", False) and bool(os.getenv("SILICONFLOW_API_KEY", "").strip())
 
 
@@ -39,9 +42,9 @@ def _cache_key(item: dict) -> str:
     return f"sfsent:{digest}"
 
 
-def _rerank_post(key: str, query: str, documents: list[str]) -> list[float]:
-    body = json.dumps({"model": RERANK_MODEL, "query": query, "documents": documents, "top_n": len(documents), "return_documents": False}).encode("utf-8")
-    request = urllib.request.Request(RERANK_URL, data=body, method="POST", headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "User-Agent": "gnitimg-finance/1.0"})
+def _rerank_post(endpoint: str, model: str, key: str, query: str, documents: list[str]) -> list[float]:
+    body = json.dumps({"model": model, "query": query, "documents": documents, "top_n": len(documents), "return_documents": False}).encode("utf-8")
+    request = urllib.request.Request(endpoint, data=body, method="POST", headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "User-Agent": "gnitimg-finance/1.0"})
     with urllib.request.urlopen(request, timeout=20) as response:
         payload = json.loads(response.read().decode("utf-8"))
     scores = [0.0] * len(documents)
@@ -60,6 +63,12 @@ def score_items(items: list[dict]) -> dict[str, float]:
     if time.time() < _cooldown_until():
         raise FinanceError("PROVIDER_COOLDOWN", "SiliconFlow skipped during failure cooldown", "siliconflow")
     key = os.getenv("SILICONFLOW_API_KEY", "").strip()
+    custom = enabled_model("rerank")
+    rerank_url, rerank_model = RERANK_URL, RERANK_MODEL
+    if custom:
+        rerank_url = f"{str(custom['base_url']).rstrip('/')}/rerank"
+        rerank_model = str(custom["model"])
+        key = str(custom["api_key"])
     scores: dict[str, float] = {}
     pending: list[dict] = []
     for item in items:
@@ -76,8 +85,8 @@ def score_items(items: list[dict]) -> dict[str, float]:
         documents = [f"{item.get('title', '')}"[:400] for item in batch]
         try:
             with ThreadPoolExecutor(max_workers=2) as pool:
-                positive_future = pool.submit(_rerank_post, key, POSITIVE_QUERY, documents)
-                negative_future = pool.submit(_rerank_post, key, NEGATIVE_QUERY, documents)
+                positive_future = pool.submit(_rerank_post, rerank_url, rerank_model, key, POSITIVE_QUERY, documents)
+                negative_future = pool.submit(_rerank_post, rerank_url, rerank_model, key, NEGATIVE_QUERY, documents)
                 positive_scores = positive_future.result()
                 negative_scores = negative_future.result()
         except Exception as exc:

@@ -318,30 +318,35 @@ def _financial_findings(secucode: str) -> dict:
             ratio = liabilities / total_assets
             findings["financial_distress"] = {
                 "detected": ratio >= 1.0,
+                "level": "high" if ratio >= 1.0 else "medium",
                 "detail": f"资产负债率 {ratio * 100:.1f}%（{str(latest.get('REPORT_DATE'))[:10]} 报告期）",
             }
             findings["financial_analysis"] = {"detected": False, "detail": f"最新报告期 {str(latest.get('REPORT_DATE'))[:10]} 结构化财务数据已接入"}
             goodwill = float(latest.get("GOODWILL") or 0)
             findings["goodwill"] = {
                 "detected": total_assets > 0 and goodwill / total_assets >= 0.15,
-                "detail": f"商誉占净资产比 {goodwill / total_assets * 100:.2f}%" if goodwill else "账面无商誉",
+                "level": "high" if total_assets > 0 and goodwill / total_assets >= 0.30 else "medium",
+                "detail": f"商誉占总资产比 {goodwill / total_assets * 100:.2f}%" if goodwill else "账面无商誉",
             }
             inventory_yoy = float(latest.get("INVENTORY_YOY") or 0)
             inventory_ratio = float(latest.get("INVENTORY") or 0) / total_assets
             findings["inventory_impairment"] = {
                 "detected": inventory_yoy >= 60.0 and inventory_ratio >= 0.10,
+                "level": "medium",
                 "detail": f"存货同比 {inventory_yoy:+.1f}%，占总资产 {inventory_ratio * 100:.2f}%",
             }
             receivable_yoy = float(latest.get("ACCOUNTS_RECE_YOY") or 0)
             receivable_ratio = float(latest.get("ACCOUNTS_RECE") or 0) / total_assets
             findings["receivables_bad_debt"] = {
                 "detected": receivable_yoy >= 60.0 and receivable_ratio >= 0.15,
+                "level": "medium",
                 "detail": f"应收账款同比 {receivable_yoy:+.1f}%，占总资产 {receivable_ratio * 100:.2f}%",
             }
             monetary_ratio = float(latest.get("MONETARYFUNDS") or 0) / total_assets
             interest_debt = float(latest.get("INTEREST_DEBT_RATIO") or 0)
             findings["deposit_loan_high"] = {
                 "detected": monetary_ratio >= 0.30 and interest_debt >= 20.0,
+                "level": "medium",
                 "detail": f"货币资金占总资产 {monetary_ratio * 100:.1f}%，带息负债率 {interest_debt:.1f}%",
             }
     if main:
@@ -355,8 +360,9 @@ def _financial_findings(secucode: str) -> dict:
             "detail": ("经营现金流连续两期为负" if streak else "净利润为正但经营现金流为负") if (streak or divergence) else f"经营现金流为正（净现比 {float(main[0].get('NCO_NETPROFIT') or 0):.2f}）",
         }
         profit_yoy = main[0].get("PARENTNETPROFITTZ")
+        profit_yoy = main[0].get("PARENTNETPROFITTZ")
         if profit_yoy is not None and float(profit_yoy) <= -30.0 and "earnings_risk" not in findings:
-            findings["earnings_risk"] = {"detected": True, "detail": f"归母净利润同比 {float(profit_yoy):+.1f}%（最新报告期）"}
+            findings["earnings_risk"] = {"detected": True, "level": "high" if float(profit_yoy) <= -50.0 else "medium", "detail": f"归母净利润同比 {float(profit_yoy):+.1f}%（最新报告期）"}
     return findings
 
 
@@ -397,15 +403,66 @@ def _executive_findings(market: str, symbol: str, secucode: str, entity: str | N
             announcements = []
         if announcements:
             latest = announcements[0]
-            detected = "计划" in latest["title"]
+            detected = any(term in latest["title"] for term in ("减持", "司法拍卖"))
             existing = findings.get("shareholder_reduction") or {}
             if detected or not existing:
                 findings["shareholder_reduction"] = {
                     "detected": True,
+                    "level": "medium",
                     "detail": f"最近减持公告：{latest['title']}（{latest['date']}）" + (f"；{existing.get('detail')}" if existing.get("detail") else ""),
                 }
             elif existing.get("detail"):
                 findings["shareholder_reduction"]["detail"] += f"；公告线索：{latest['title']}（{latest['date']}）"
+        try:
+            findings.update(cninfo_regulatory_findings(symbol, entity))
+        except Exception:
+            pass
+    return findings
+
+
+_REGULATORY_KEYWORDS = {
+    "investigation": ("立案", "侦查"),
+    "violation_penalty": ("处罚", "罚款", "警示函", "监管函", "公开谴责"),
+    "regulatory_inquiry": ("问询函", "关注函", "监管工作函"),
+}
+_REGULATORY_LEVEL = {"investigation": "high", "violation_penalty": "high", "regulatory_inquiry": "medium"}
+
+
+def cninfo_reduction_announcements(symbol: str, keyword: str, days: int = 180) -> list[dict]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    return [
+        row for row in cninfo_search(symbol, "减持", days=days)
+        if row["date"] >= cutoff and any(term in row["title"] for term in ("减持", "司法拍卖"))
+    ]
+
+
+def cninfo_regulatory_findings(symbol: str, keyword: str) -> dict:
+    """Investigation / penalty / inquiry verdicts from official filings.
+
+    A single pass over the announcement list fans every title out to the
+    three regulator categories, so one cninfo request covers all three.
+    """
+    announcements = cninfo_search(symbol, "", days=365)
+    if not announcements:
+        announcements = [row for name in ("立案", "处罚", "问询函") for row in cninfo_search(symbol, name, days=365)]
+    announcements = [row for row in announcements if row["date"] >= since]
+    findings = {}
+    for key, terms in _REGULATORY_KEYWORDS.items():
+        for item in announcements or []:
+            title = str(item.get("announcementTitle") or "").replace("<em>", "").replace("</em>", "")
+            # Only the company's own regulatory filings count; routine titles
+            # that merely quote a rule are skipped by the term-in-title check.
+            stamp = item.get("announcementTime")
+            date = datetime.fromtimestamp(stamp / 1000, tz=timezone.utc).date().isoformat() if stamp else None
+            if any(term in title for term in terms):
+                findings[key] = {
+                    "detected": True,
+                    "level": _REGULATORY_LEVEL[key],
+                    "detail": f"监管公告：{title[:60]}（{date}）",
+                }
+                break
+        if key not in findings:
+            findings[key] = {"detected": False, "detail": f"近一年无{({'investigation': '立案', 'violation_penalty': '处罚', 'regulatory_inquiry': '问询'})[key]}类公告"}
     return findings
 
 
@@ -527,7 +584,8 @@ def risk_reports(market: str, symbol: str, security_name: str | None = None) -> 
             predict_type = str(latest.get("PREDICT_TYPE") or "")
             report_date = str(latest.get("REPORT_DATE"))[:10]
             if any(bad in predict_type for bad in _BAD_FORECAST_TYPES):
-                findings["earnings_risk"] = {"detected": True, "detail": f"业绩预告 {predict_type}（{report_date} 报告期）"}
+                level = "high" if any(bad in predict_type for bad in ("预亏", "首亏", "续亏")) else "medium"
+                findings["earnings_risk"] = {"detected": True, "level": level, "detail": f"业绩预告 {predict_type}（{report_date} 报告期）"}
             elif any(good in predict_type for good in _GOOD_FORECAST_TYPES):
                 findings["earnings_risk"] = {"detected": False, "detail": f"业绩预告 {predict_type}（{report_date} 报告期）"}
     except Exception:
@@ -574,13 +632,17 @@ def cninfo_org_id(keyword: str) -> str | None:
     return org
 
 
-def cninfo_reduction_announcements(symbol: str, keyword: str, days: int = 180) -> list[dict]:
-    """Official cninfo announcements mentioning reduction for this stock.
+def cninfo_search(symbol: str, keyword: str, days: int = 365) -> list[dict]:
+    """Recent official cninfo announcements matching a keyword for this stock.
 
-    This is the only keyless channel that reaches the controlling/shareholder
-    tier the executive-change report cannot see, and it is independent of the
-    East Money hosts entirely.
+    cninfo's full-text query only honours the stock filter when a searchkey
+    is present - without one it silently returns site-wide announcements -
+    so every category runs its own keyword search with an independent cache.
     """
+    cache_key = f"cninfo:ann:{symbol}:{keyword}"
+    cached, _meta = CACHE.get(cache_key, 600)
+    if cached is not None and isinstance(cached, list):
+        return cached
     org = cninfo_org_id(keyword) or ""
     today = datetime.now(timezone.utc).date().isoformat()
     since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
@@ -588,7 +650,7 @@ def cninfo_reduction_announcements(symbol: str, keyword: str, days: int = 180) -
         _CNINFO_SEARCH_URL,
         {
             "pageNum": "1", "pageSize": "15", "column": "sse", "tabName": "fulltext",
-            "stock": f"{symbol},{org}", "searchkey": "减持",
+            "stock": f"{symbol},{org}", "searchkey": keyword,
             "seDate": f"{since}~{today}", "sortName": "time", "sortType": "desc", "isHLtitle": "true",
         },
         headers=_CNINFO_HEADERS, timeout=12,
