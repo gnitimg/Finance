@@ -190,7 +190,10 @@ export async function fetchModelCatalog(base_url, api_key, kind = null) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 8000)
   try {
-    const response = await fetch(`${clean}/models`, { headers: { Authorization: `Bearer ${String(api_key || '')}` }, signal: controller.signal })
+    const params = new URLSearchParams()
+    if (kind && CATALOG_SUBTYPE[kind]) params.set('type', 'text')
+    if (kind && CATALOG_SUBTYPE[kind]) params.set('sub_type', CATALOG_SUBTYPE[kind])
+    const response = await fetch(`${clean}/models?${params}`, { headers: { Authorization: `Bearer ${String(api_key || '')}` }, signal: controller.signal })
     if (!response.ok) throw Object.assign(new Error(`模型列表请求失败 HTTP ${response.status}`), { statusCode: 502 })
     const payload = await response.json()
     const ids = (payload.data || payload.models || []).map((m) => (typeof m === 'string' ? m : m.id)).filter(Boolean)
