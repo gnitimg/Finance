@@ -12,9 +12,9 @@ FEATURE_NAMES = [
     "return_1", "return_2", "return_3", "acceleration", "ma3_gap", "ma5_gap",
     "ma10_gap", "momentum_5", "trend_5", "volatility_5", "range_pct",
     "close_location", "volume_ratio", "return_5", "ma20_gap", "breakout_10",
-    "volume_impulse", "volatility_ratio",
+    "volume_impulse", "volatility_ratio", "candle_streak", "up_ratio_10",
 ]
-STATE_VERSION = 6
+STATE_VERSION = 7
 MIN_SAMPLES = 15
 # Recency bounds keep the kNN analogue and the per-step path fits affordable
 # on long training contexts without changing their short-memory character.
@@ -92,6 +92,16 @@ def _features(bars: list[dict], index: int) -> list[float] | None:
     long_variance = sum((item - long_mean) ** 2 for item in long_returns) / len(long_returns)
     recent_range = max(closes[-10:]) - min(closes[-10:])
     volume_ratio = volumes[-1] / mean_volume - 1 if mean_volume else 0.0
+    up_flags = [1.0 if closes[i] > closes[i - 1] else -1.0 if closes[i] < closes[i - 1] else 0.0 for i in range(1, len(closes))]
+    candle_streak = 0.0
+    for flag in reversed(up_flags):
+        if flag == 0:
+            break
+        if candle_streak == 0 or (flag > 0) == (candle_streak > 0):
+            candle_streak += flag
+        else:
+            break
+    up_ratio_10 = sum(1.0 for flag in up_flags[-10:] if flag > 0) / 10.0 - 0.5
     return [
         returns[-1],
         price / closes[-3] - 1,
@@ -111,6 +121,8 @@ def _features(bars: list[dict], index: int) -> list[float] | None:
         (price - min(closes[-10:])) / recent_range - 0.5 if recent_range else 0.0,
         returns[-1] * (1 + max(-0.9, volume_ratio)),
         math.sqrt(variance) / max(math.sqrt(long_variance), 1e-8),
+        candle_streak,
+        up_ratio_10,
     ]
 
 
