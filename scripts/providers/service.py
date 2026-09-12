@@ -5,12 +5,14 @@ from datetime import datetime
 from ..cache import CACHE
 from ..models import FinanceError
 from ..symbols import METAL_SINA, normalize
+from .coinbase import candles as coinbase_candles
+from .coinbase import quote_realtime as coinbase_quote
 from .coingecko import market_chart, quote_crypto
 from .sina import quote_cn, quote_gb, quote_hf, quote_hk
 from .yahoo import chart
 
 
-TTL = {"cn": 2, "hk": 3, "us": 3, "crypto": 5, "etf": 3, "fund": 15, "future": 3, "metal": 3}
+TTL = {"cn": 2, "hk": 3, "us": 3, "crypto": 8, "etf": 3, "fund": 15, "future": 3, "metal": 3}
 STALE = {"cn": 900, "hk": 1800, "us": 1800, "crypto": 300, "etf": 1800, "fund": 3600, "future": 900, "metal": 900}
 
 
@@ -30,7 +32,10 @@ def quote(market: str, symbol: str) -> dict:
         if market == "cn":
             result, http_meta = quote_cn(symbol)
         elif market == "crypto":
-            result, http_meta = quote_crypto(symbol)
+            try:
+                result, http_meta = coinbase_quote(symbol)
+            except FinanceError:
+                result, http_meta = quote_crypto(symbol)
         elif market == "metal" and symbol in METAL_SINA:
             try:
                 result, http_meta = quote_hf(METAL_SINA[symbol], symbol)
@@ -63,14 +68,17 @@ def quote(market: str, symbol: str) -> dict:
 def history(market: str, symbol: str, range_name: str = "3mo", interval: str = "1d") -> dict:
     market, symbol = normalize(market, symbol)
     key = f"history:{market}:{symbol}:{range_name}:{interval}"
-    ttl = 5 if interval != "1d" else 300
+    ttl = 30 if market == "crypto" and interval != "1d" else 5 if interval != "1d" else 300
     cached, meta = CACHE.get(key, ttl)
     if cached:
         return _with_cache_meta(cached, meta)
     try:
         if market == "crypto":
-            days = {"1d": 1, "5d": 5, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365}.get(range_name, 90)
-            bars, http_meta = market_chart(symbol, days)
+            days = {"1d": 1, "5d": 5, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}.get(range_name, 90)
+            try:
+                bars, http_meta = coinbase_candles(symbol, interval, days)
+            except (FinanceError, ValueError):
+                bars, http_meta = market_chart(symbol, days)
             current = quote(market, symbol)
             result = {"asset": current["asset"], "quote": current["quote"], "history": bars, "provider_timing": http_meta}
         else:
