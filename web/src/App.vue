@@ -143,7 +143,19 @@ const modelForms = reactive({ chat: {}, rerank: {}, embedding: {} })
 const modelCatalog = reactive({ chat: [], rerank: [], embedding: [] })
 const modelCatalogBusy = ref('')
 const modelClearArm = ref('')
+let catalogTimer = 0
 const kindLabels = { chat: '对话模型', rerank: '重排序模型', embedding: '嵌入模型（预留）' }
+watch(() => {
+  const kind = modelFormOpen.value
+  if (!kind) return ''
+  const form = modelForms[kind]
+  return `${kind}|${form.base_url}|${form.api_key}`
+}, (signature) => {
+  if (!signature) return
+  const kind = signature.split('|')[0]
+  window.clearTimeout(catalogTimer)
+  catalogTimer = window.setTimeout(() => loadModelCatalog(kind), 450)
+})
 function kindLabel(kind) { return kindLabels[kind] || kind }
 function slotStatus(kind) {
   const slot = modelSlots.value[kind]
@@ -161,6 +173,7 @@ function editModel(kind) {
   modelForms[kind] = { base_url: slot?.base_url || '', api_key: '', model: slot?.model || '', enabled: Boolean(slot?.enabled) }
   modelCatalog[kind] = []
   modelFormOpen.value = kind
+  if (modelForms[kind].base_url) loadModelCatalog(kind)
 }
 async function loadModelCatalog(kind) {
   const form = modelForms[kind]
@@ -1070,18 +1083,17 @@ onBeforeUnmount(() => {
               <div class="model-edit">
                 <label><span>Base URL</span><input v-model="modelForms[kind].base_url" placeholder="https://api.siliconflow.cn/v1" @change="loadModelCatalog(kind)" /></label>
                 <label><span>API Key</span><input v-model="modelForms[kind].api_key" type="password" :placeholder="modelSlots[kind]?.has_key ? '已保存，留空则沿用' : 'sk-...'" /></label>
-                <label><span>模型</span>
+                <label class="span-2"><span>模型{{ modelCatalogBusy === kind ? '（列表拉取中…）' : '' }}</span>
                   <select v-if="modelCatalog[kind].length" v-model="modelForms[kind].model">
                     <option v-for="id in modelCatalog[kind]" :key="id" :value="id">{{ id }}</option>
                   </select>
-                  <input v-else v-model="modelForms[kind].model" placeholder="填写或保存后自动拉取模型列表" />
+                  <input v-else v-model="modelForms[kind].model" placeholder="填写 Base URL 后自动拉取模型列表" />
                 </label>
                 <div class="model-toggle"><span>启用</span><input :id="`tg-${kind}`" v-model="modelForms[kind].enabled" type="checkbox" /><label :for="`tg-${kind}`" class="model-switch"><i></i></label></div>
                 <div class="model-form-actions">
-                  <button type="button" @click="loadModelCatalog(kind)">{{ modelCatalogBusy === kind ? '拉取中…' : '拉取模型列表' }}</button>
                   <button type="button" @click="modelFormOpen = ''">取消</button>
-                  <button type="button" class="primary" @click="saveModel(kind)">保存</button>
                   <button type="button" class="danger" :class="{ armed: modelClearArm === kind }" @click="clearModel(kind)">{{ modelClearArm === kind ? '确认清除' : '清除' }}</button>
+                  <button type="button" class="primary" @click="saveModel(kind)">保存</button>
                 </div>
               </div>
             </template>
