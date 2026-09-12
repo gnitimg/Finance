@@ -178,6 +178,8 @@ export function clearModelSlot(kind) {
   return existed
 }
 
+const CATALOG_SUBTYPE = { chat: 'chat', rerank: 'reranker', embedding: 'embedding' }
+
 export async function fetchModelCatalog(base_url, api_key, kind = null) {
   const clean = String(base_url || '').trim().replace(/\/$/, '')
   if (!api_key && kind && MODEL_KINDS.has(kind)) {

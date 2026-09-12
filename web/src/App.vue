@@ -175,6 +175,11 @@ function editModel(kind) {
   modelFormOpen.value = kind
   if (modelForms[kind].base_url) loadModelCatalog(kind)
 }
+const CATALOG_MATCHERS = {
+  chat: null,
+  rerank: /rerank/i,
+  embedding: /embed|bge|m3/i,
+}
 async function loadModelCatalog(kind) {
   const form = modelForms[kind]
   if (!form.base_url) return
@@ -183,7 +188,8 @@ async function loadModelCatalog(kind) {
     const params = new URLSearchParams({ base_url: form.base_url, kind })
     if (form.api_key) params.set('key', form.api_key)
     const payload = await fetchJson(`/api/models/catalog?${params}`)
-    modelCatalog[kind] = payload.data.models || []
+    const matcher = CATALOG_MATCHERS[kind]
+    modelCatalog[kind] = matcher ? (payload.data.models || []).filter((id) => matcher.test(id)) : payload.data.models || []
     if (modelCatalog[kind].length && !modelCatalog[kind].includes(form.model)) form.model = modelCatalog[kind][0]
   } catch { modelCatalog[kind] = [] }
   finally { modelCatalogBusy.value = '' }
@@ -1082,12 +1088,13 @@ onBeforeUnmount(() => {
             <template v-if="modelFormOpen === kind">
               <div class="model-edit">
                 <label><span>Base URL</span><input v-model="modelForms[kind].base_url" placeholder="https://api.siliconflow.cn/v1" @change="loadModelCatalog(kind)" /></label>
-                <label><span>API Key</span><input v-model="modelForms[kind].api_key" type="password" :placeholder="modelSlots[kind]?.has_key ? '已保存，留空则沿用' : 'sk-...'" /></label>
-                <label class="span-2"><span>模型{{ modelCatalogBusy === kind ? '（列表拉取中…）' : '' }}</span>
+                <label><span>API Key</span><input v-model="modelForms[kind].api_key" type="password" :placeholder="modelSlots[kind]?.has_key ? '已保存，留空则沿用' : 'sk-...'" @change="loadModelCatalog(kind)" /></label>
+                <label><span>模型</span>
                   <select v-if="modelCatalog[kind].length" v-model="modelForms[kind].model">
                     <option v-for="id in modelCatalog[kind]" :key="id" :value="id">{{ id }}</option>
+                    <option v-if="modelCatalogBusy === kind" disabled>加载中…</option>
                   </select>
-                  <input v-else v-model="modelForms[kind].model" placeholder="填写 Base URL 后自动拉取模型列表" />
+                  <input v-else v-model="modelForms[kind].model" placeholder="选择模型" />
                 </label>
                 <div class="model-toggle"><span>启用</span><input :id="`tg-${kind}`" v-model="modelForms[kind].enabled" type="checkbox" /><label :for="`tg-${kind}`" class="model-switch"><i></i></label></div>
                 <div class="model-form-actions">
@@ -1106,7 +1113,6 @@ onBeforeUnmount(() => {
               <small v-if="modelSlots[kind]" class="model-endpoint">{{ modelSlots[kind].base_url }} · {{ modelSlots[kind].model }}</small>
             </template>
           </div>
-          <p class="models-note">配置并启用后立即用于情绪打分与相关分析；未配置时 AI 相关功能保持关闭（已接入的嵌入与重排序除外）。</p>
         </section>
         <section v-show="settingsSection === 'about'" class="settings-block about-settings">
           <div class="settings-title"><div><span>06</span><h3>关于</h3></div></div>
