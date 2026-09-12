@@ -1,0 +1,11 @@
+[Unit]
+Description=Run GNITIMG Finance background calibration every 30 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=30min
+RandomizedDelaySec=90
+Unit=gnitimg-finance-train.service
+
+[Install]
+WantedBy=timers.target

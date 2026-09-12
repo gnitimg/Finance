@@ -1,0 +1,19 @@
+[Unit]
+Description=GNITIMG Finance background model calibration sweep
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/site/finance
+ExecStart=/home/ubuntu/site/finance/.venv/bin/python tools/background_train.py
+TimeoutStartSec=540
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/site/finance/data
+UMask=0027

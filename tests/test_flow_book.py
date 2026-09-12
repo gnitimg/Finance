@@ -8,7 +8,42 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.cache import Cache
 from scripts.monitoring.ml import flow_series_by_index
 from scripts.providers import eastmoney
+from scripts.providers.sina import quote_gb, quote_hk
 from scripts.providers.tencent import order_book_cn
+
+GB_PAYLOAD = (
+    'var hq_str_gb_nvda="英伟达,218.2900,-0.03,2026-09-12 09:49:31,-0.0700,221.2350,222.0000,218.1500,'
+    '236.2900,164.0200,89060140,146731240,5260789014625,6.57,33.230000,0.00,0.00,0.00,0.00,24100000067,69,'
+    '218.2600,-0.01,-0.03,Sep 11 08:01PM EDT,Sep 11 04:00PM EDT,218.3600,5860128,1,2026,19551225805.0000,'
+    '232.0498,214.9710,1279734687.8914,218.2900,218.3600";'
+).encode("gb18030")
+
+HK_PAYLOAD = (
+    'var hq_str_hk00700="TENCENT,腾讯控股,419.400,425.600,430.800,419.400,428.400,2.800,0.658,428.39999,'
+    '428.79999,6674835081,15628379,0.000,0.000,675.134,411.000,2026/09/11,16:09";'
+).encode("gb18030")
+
+
+class SinaGlobalTests(unittest.TestCase):
+    @patch("scripts.providers.sina.request_bytes", return_value=(GB_PAYLOAD, {"status": 200}))
+    def test_parses_us_snapshot(self, _request):
+        result, _meta = quote_gb("NVDA")
+        quote = result["quote"]
+        self.assertEqual(quote["price"], 218.29)
+        self.assertEqual(quote["previous_close"], 218.36)
+        self.assertEqual(quote["open"], 221.235)
+        self.assertIsNone(result["asset"]["exchange"])
+        self.assertTrue(quote["realtime"])
+        self.assertIn(quote["market_state"], {"REGULAR", "CLOSED"})
+
+    @patch("scripts.providers.sina.request_bytes", return_value=(HK_PAYLOAD, {"status": 200}))
+    def test_parses_hk_snapshot(self, _request):
+        result, _meta = quote_hk("00700")
+        quote = result["quote"]
+        self.assertEqual(quote["price"], 428.4)
+        self.assertEqual(quote["previous_close"], 425.6)
+        self.assertAlmostEqual(quote["change_pct"], 0.6578947, places=4)
+        self.assertEqual(result["asset"]["currency"], "HKD")
 
 
 class FlowSeriesTests(unittest.TestCase):

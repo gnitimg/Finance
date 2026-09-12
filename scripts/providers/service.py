@@ -6,7 +6,7 @@ from ..cache import CACHE
 from ..models import FinanceError
 from ..symbols import METAL_SINA, normalize
 from .coingecko import market_chart, quote_crypto
-from .sina import quote_cn, quote_hf
+from .sina import quote_cn, quote_gb, quote_hf, quote_hk
 from .yahoo import chart
 
 
@@ -37,6 +37,16 @@ def quote(market: str, symbol: str) -> dict:
             except FinanceError:
                 result, http_meta = chart(market, symbol, "5d", "15m")
                 result["warnings"] = list(result.get("warnings") or []) + ["Sina snapshot unavailable; quote uses the delayed Yahoo futures feed."]
+        elif market == "us":
+            try:
+                result, http_meta = quote_gb(symbol)
+            except FinanceError:
+                result, http_meta = chart(market, symbol, "5d", "15m")
+        elif market == "hk":
+            try:
+                result, http_meta = quote_hk(symbol)
+            except FinanceError:
+                result, http_meta = chart(market, symbol, "5d", "15m")
         else:
             result, http_meta = chart(market, symbol, "5d", "15m")
         result["provider_timing"] = http_meta
@@ -71,6 +81,16 @@ def history(market: str, symbol: str, range_name: str = "3mo", interval: str = "
                     live = quote_cn(symbol)[0]
                     result["quote"] = live["quote"]
                     result["asset"].update({k: v for k, v in live["asset"].items() if v})
+                    stitch_live_bars(result, live, interval)
+                except FinanceError:
+                    result.setdefault("warnings", []).append("Sina snapshot unavailable; quote uses Yahoo chart metadata")
+            elif market in {"us", "hk"}:
+                snapshot = quote_gb if market == "us" else quote_hk
+                try:
+                    live = snapshot(symbol)[0]
+                    stale_fields = {key: value for key, value in result["quote"].items() if live["quote"].get(key) is None}
+                    result["quote"] = live["quote"]
+                    result["quote"].update(stale_fields)
                     stitch_live_bars(result, live, interval)
                 except FinanceError:
                     result.setdefault("warnings", []).append("Sina snapshot unavailable; quote uses Yahoo chart metadata")
