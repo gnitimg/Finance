@@ -64,7 +64,9 @@ export function runFinance(args, { timeoutMs = 20000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(PYTHON, [SCRIPT, ...args], {
       cwd: ROOT,
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      // Web requests render the primary feed first and consume only pre-warmed
+      // East Money context. Direct finance-skill CLI use may warm its own cache.
+      env: { ...process.env, PYTHONUNBUFFERED: '1', FINANCE_FAST_PATH: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
     })

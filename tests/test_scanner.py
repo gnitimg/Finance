@@ -48,6 +48,20 @@ class ScannerTests(unittest.TestCase):
         result = scan(item, {"forecast_pct": 0.7, "price_change_pct": 4.0, "volume_ratio": 1.8})
         self.assertNotIn("potential", {entry["category"] for entry in result["matches"]})
 
+    def test_public_risk_evidence_triggers_sourced_alert_without_price_move(self):
+        item = payload(change=0.1, forecast_return=0.1, technical=0, volume=1.0)
+        item["market_sentiment"]["score"] = 0
+        item["company_risk"] = {
+            "status": "ready", "priority_score": 82, "detected_count": 1,
+            "detected": [{"key": "investigation", "label": "立案调查", "severity": "high", "evidence": [{"title": "收到立案告知书", "source": "交易所公告", "url": "https://example.test/a"}]}],
+            "sources": [{"name": "交易所公告"}], "as_of": "2026-09-12T03:00:00Z",
+            "disclaimer": "未命中不等于不存在",
+        }
+        result = scan(item, {"forecast_pct": 0.7, "price_change_pct": 2.0, "volume_ratio": 1.8})
+        self.assertEqual({entry["category"] for entry in result["matches"]}, {"risk"})
+        self.assertEqual(result["alerts"][0]["source"], "交易所公告")
+        self.assertIn("立案调查", result["alerts"][0]["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,7 +11,9 @@ from .config import DATA_DIR
 
 class Cache:
     PRUNE_INTERVAL = 600
-    RETENTION_SECONDS = 86_400
+    # Industry classifications are intentionally cached for seven days. Keep
+    # entries one extra day so pruning cannot remove a still-valid mapping.
+    RETENTION_SECONDS = 8 * 86_400
 
     def __init__(self, path: Path | None = None):
         self.path = path or DATA_DIR / "cache.sqlite3"

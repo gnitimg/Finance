@@ -17,16 +17,17 @@ if str(ROOT) not in sys.path:
 
 from scripts.analyzers.position import analyze_position
 from scripts.backtest import run as run_backtest
+from scripts.analyzers.company_risk import analyze as company_risk_analysis
 from scripts.analyzers.market_sentiment import analyze as market_sentiment_analysis
 from scripts.analyzers.stablecoin import analyze as stablecoin_analysis
 from scripts.analyzers.technical import analyze as technical_analysis
 from scripts.cache import CACHE
-from scripts.config import load_dotenv, read_json
+from scripts.config import env_bool, load_dotenv, read_json
 from scripts.models import FinanceError, clean_json, utc_now
 from scripts.monitoring.ml import adaptive_horizon, flow_series_by_index, forecast
 from scripts.monitoring.scanner import scan as monitor_scan
 from scripts.news.service import cached_news, get_news
-from scripts.providers.eastmoney import cached_daily_flow
+from scripts.providers.eastmoney import cached_daily_flow, cached_market_reference, cached_sector_context, sector_context
 from scripts.providers.service import history, quote
 from scripts.providers.tencent import order_book_cn
 from scripts.routing import classify
@@ -96,6 +97,26 @@ def quote_asset(market: str, symbol: str) -> dict:
     return result
 
 
+def _sector_view(payload: dict | None) -> dict | None:
+    if not payload or not payload.get("industry"):
+        return None
+    return {
+        "industry": payload.get("industry"),
+        "board_code": payload.get("board_code"),
+        "board_name": payload.get("board_name"),
+        "board_change_pct": payload.get("board_change_pct_now"),
+        "board_main_net": payload.get("board_main_net"),
+        "board_return_1": payload.get("board_return_1"),
+        "board_momentum_20": payload.get("board_momentum_20"),
+        "index_return_1": payload.get("index_return_1"),
+        "index_momentum_20": payload.get("index_momentum_20"),
+        "top_boards": payload.get("top_boards") or [],
+        "source": payload.get("source") or "East Money",
+        "as_of": payload.get("as_of"),
+        "cache": payload.get("cache") or {},
+    }
+
+
 def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: str = "1d", shares: float | None = None, cost: float | None = None, use_ml: bool = True) -> dict:
     started = time.perf_counter()
     result = envelope("analyze")
@@ -131,7 +152,7 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
                 result["warnings"].append(f"Extended ML context unavailable: {exc.message}")
     data_ms = round((time.perf_counter() - data_started) * 1000, 2)
     analysis_started = time.perf_counter()
-    technical = technical_analysis(display_history, market_data["quote"].get("price"))
+    technical = technical_analysis(display_history, market_data["quote"].get("price"), interval)
     market_sentiment = market_sentiment_analysis(display_history, market_data["quote"], technical, (related_content or {}).get("sentiment"))
     market_sentiment["sources"] = [market_data["quote"].get("source"), "technical and anomaly engine"]
     if (related_content or {}).get("sentiment", {}).get("evidence_count"):
@@ -141,6 +162,17 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
     horizon = adaptive_horizon(market, symbol, interval, asset_type)
     live_context = market_sentiment
     flow = None
+    sector_payload = None
+    if use_ml and market == "cn":
+        # Interactive analysis never waits on East Money's board endpoints.
+        # The optional context stage and the background trainer pre-warm this
+        # cache, so switching symbols remains bounded by the primary feed.
+        sector_payload = cached_sector_context(market, symbol)
+        if not sector_payload and not env_bool("FINANCE_FAST_PATH", False):
+            try:
+                sector_payload = sector_context(market, symbol)
+            except Exception as exc:
+                result["warnings"].append(f"Sector context unavailable: {type(exc).__name__}")
     if use_ml and market in {"cn", "hk", "us"}:
         try:
             flow = cached_daily_flow(market, symbol)
@@ -155,10 +187,26 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
                 live_context = {**live_context, "book": {"imbalance": book["imbalance"], "active_buy_ratio": book["active_buy_ratio"]}}
             except FinanceError as exc:
                 result["warnings"].append(f"Order-book signal unavailable: {exc.message}")
-    ml = forecast(ml_history, market, symbol, interval, horizon, to_session_close=to_session_close, asset_type=asset_type, live_context=live_context, flow=flow) if use_ml else {"status": "disabled", "series": {"predicted": [], "actual": []}}
+        if sector_payload:
+            live_context = {**live_context, "sector": {"board_change_pct": sector_payload.get("board_change_pct_now"), "board_ma20_gap": sector_payload.get("board_ma20_gap")}}
+    market_ref = None
+    if sector_payload and interval == "1d" and sector_payload.get("board_code"):
+        market_ref = cached_market_reference(sector_payload.get("board_code"))
+    ml = forecast(ml_history, market, symbol, interval, horizon, to_session_close=to_session_close, asset_type=asset_type, live_context=live_context, flow=flow, market_ref=market_ref) if use_ml else {"status": "disabled", "series": {"predicted": [], "actual": []}}
     ml["context"] = ml_context
     position = analyze_position(float(market_data["quote"]["price"]), shares, cost)
-    result["data"] = {**market_data, "technical": technical, "market_sentiment": market_sentiment, "ml_forecast": ml, "position": position}
+    company_risk = company_risk_analysis(
+        (related_content or {}).get("items") or [],
+        market=market,
+        entity=(market_data.get("asset") or {}).get("name") or symbol,
+        flow=flow,
+        news_providers=(related_content or {}).get("providers_checked"),
+        as_of=market_data["quote"].get("as_of"),
+    )
+    result["data"] = {**market_data, "technical": technical, "market_sentiment": market_sentiment, "company_risk": company_risk, "ml_forecast": ml, "position": position}
+    sector_view = _sector_view(sector_payload)
+    if sector_view:
+        result["data"]["sector"] = sector_view
     result["warnings"].extend(market_data.get("warnings") or [])
     result["warnings"].append("Machine-learning confidence is historical calibration quality, not a probability or promise.")
     analysis_ms = round((time.perf_counter() - analysis_started) * 1000, 2)
@@ -181,11 +229,45 @@ def news_asset(market: str, symbol: str, limit: int = 12) -> dict:
     if context:
         bars = context.get("history") or []
         quote_data = context.get("quote") or {}
-        technical = technical_analysis(bars, quote_data.get("price"))
+        technical = technical_analysis(bars, quote_data.get("price"), "1d")
         news["market_sentiment"] = market_sentiment_analysis(bars, quote_data, technical, news.get("sentiment"))
         news["market_sentiment"]["sources"] = [quote_data.get("source"), "Yahoo Finance historical bars", "东方财富 / GDELT / Yahoo Finance related content"]
+    flow = cached_daily_flow(market, symbol) if market in {"cn", "hk", "us"} else None
+    news["company_risk"] = company_risk_analysis(
+        news.get("items") or [],
+        market=market,
+        entity=related_name or symbol,
+        flow=flow,
+        news_providers=news.get("providers_checked"),
+        as_of=news.get("generated_at"),
+    )
+    if market == "cn":
+        try:
+            sector_view = _sector_view(sector_context(market, symbol))
+            if sector_view:
+                news["sector"] = sector_view
+        except Exception as exc:  # optional context must not hide verified news
+            news.setdefault("warnings", []).append(f"Sector context unavailable: {type(exc).__name__}")
     if context_warning:
         news.setdefault("warnings", []).append(context_warning)
+    return news
+
+
+def risk_context_asset(market: str, symbol: str, limit: int = 20) -> dict:
+    """Refresh watchlist risk evidence without loading charts or a model."""
+    market, symbol = normalize(market, symbol)
+    cached_quote, _cache_meta = CACHE.get(f"quote:{market}:{symbol}", 0, 86_400)
+    related_name = ((cached_quote or {}).get("asset") or {}).get("name")
+    news = get_news(market, symbol, limit, related_name)
+    flow = cached_daily_flow(market, symbol) if market in {"cn", "hk", "us"} else None
+    news["company_risk"] = company_risk_analysis(
+        news.get("items") or [],
+        market=market,
+        entity=related_name or symbol,
+        flow=flow,
+        news_providers=news.get("providers_checked"),
+        as_of=news.get("generated_at"),
+    )
     return news
 
 
@@ -395,6 +477,11 @@ def build_parser() -> argparse.ArgumentParser:
     news_cmd.add_argument("--symbol", required=True)
     news_cmd.add_argument("--limit", type=int, default=12)
     pretty(news_cmd)
+    risk_context_cmd = sub.add_parser("risk-context")
+    risk_context_cmd.add_argument("--market", required=True)
+    risk_context_cmd.add_argument("--symbol", required=True)
+    risk_context_cmd.add_argument("--limit", type=int, default=20)
+    pretty(risk_context_cmd)
     bt_cmd = sub.add_parser("backtest")
     bt_cmd.add_argument("--market", default="auto")
     bt_cmd.add_argument("--symbol", required=True)
@@ -442,6 +529,12 @@ def main() -> int:
             result["warnings"].extend(result["data"].get("warnings") or [])
             result["timing"]["total_ms"] = round((time.perf_counter() - started) * 1000, 2)
             result["routing"] = {"level": "L1", "specialist_requested": False, "specialist_used": False, "reason": "deterministic_news_sentiment", "specialist_model": None}
+        elif args.command == "risk-context":
+            result = envelope("risk-context")
+            result["data"] = risk_context_asset(args.market, args.symbol, args.limit)
+            result["warnings"].extend(result["data"].get("warnings") or [])
+            result["timing"]["total_ms"] = round((time.perf_counter() - started) * 1000, 2)
+            result["routing"] = {"level": "L1", "specialist_requested": False, "specialist_used": False, "reason": "deterministic_background_risk_context", "specialist_model": None}
         elif args.command == "monitor":
             result = monitor_assets(args.asset, args.forecast_pct, args.price_change_pct, args.volume_ratio)
         elif args.command == "train":

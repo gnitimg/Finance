@@ -86,6 +86,50 @@ class EastMoneyTests(unittest.TestCase):
         self.assertEqual(eastmoney.secid("hk", "00700"), "116.00700")
         self.assertIsNone(eastmoney.secid("crypto", "BTC"))
 
+    @patch("scripts.providers.eastmoney._fetch_json")
+    def test_industry_mapping_uses_seven_day_cache(self, fetch):
+        fetch.return_value = {"data": {"f127": "电力行业"}}
+        self.assertEqual(eastmoney.stock_industry("cn", "601619"), "电力行业")
+        self.assertEqual(eastmoney.stock_industry("cn", "601619"), "电力行业")
+        fetch.assert_called_once()
+        self.assertIn("secid=1.601619", fetch.call_args.args[0])
+        self.assertEqual(eastmoney.INDUSTRY_TTL, 7 * 86_400)
+
+    @patch("scripts.providers.eastmoney._fetch_json")
+    def test_sector_kline_cache_and_twenty_day_momentum(self, fetch):
+        rows = [f"2026-01-{index + 1:02d},{index + 1}" for index in range(21)]
+        fetch.return_value = {"data": {"klines": rows}}
+        first = eastmoney.kline("90.BK0001", eastmoney.SECTOR_KLINE_LIMIT)
+        second = eastmoney.kline("90.BK0001", eastmoney.SECTOR_KLINE_LIMIT)
+        enriched = eastmoney._enrich_series(first)
+        self.assertEqual(second, first)
+        fetch.assert_called_once()
+        self.assertAlmostEqual(enriched[-1]["momentum_20"], 20.0)
+        self.assertAlmostEqual(enriched[-1]["return_1"], .05)
+
+    @patch("scripts.providers.eastmoney._fetch_json", side_effect=AssertionError("network must not run"))
+    def test_cached_sector_helpers_never_fetch(self, _fetch):
+        eastmoney.CACHE.set("sectorctx:601619", {"industry": "电力行业", "board_code": "BK0001", "source": "East Money"})
+        board = [{"date": "2026-01-01", "close": 100.0}, {"date": "2026-01-02", "close": 101.0}]
+        index = [{"date": "2026-01-01", "close": 200.0}, {"date": "2026-01-02", "close": 202.0}]
+        limit = eastmoney.SECTOR_KLINE_LIMIT
+        eastmoney.CACHE.set(f"kline:90.BK0001:{limit}", board)
+        eastmoney.CACHE.set(f"kline:1.000300:{limit}", index)
+        context = eastmoney.cached_sector_context("cn", "601619")
+        reference = eastmoney.cached_market_reference(context["board_code"])
+        self.assertEqual(context["industry"], "电力行业")
+        self.assertAlmostEqual(reference[0][-1]["return_1"], .01)
+        self.assertAlmostEqual(reference[1][-1]["return_1"], .01)
+
+    @patch("scripts.providers.eastmoney._fetch_json", side_effect=ConnectionError("blocked"))
+    def test_kline_failure_opens_cooldown_before_second_request(self, fetch):
+        with self.assertRaises(ConnectionError):
+            eastmoney.kline("90.BK0001", eastmoney.SECTOR_KLINE_LIMIT)
+        with self.assertRaises(eastmoney.FinanceError) as raised:
+            eastmoney.kline("1.000300", eastmoney.SECTOR_KLINE_LIMIT)
+        self.assertEqual(raised.exception.code, "PROVIDER_COOLDOWN")
+        fetch.assert_called_once()
+
 
 class TencentOrderBookTests(unittest.TestCase):
     def test_parses_levels_and_active_volumes(self):

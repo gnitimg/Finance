@@ -30,6 +30,7 @@ def scan(data: dict, thresholds: dict) -> dict:
     evaluation = forecast.get("evaluation") or {}
     next_forecast = forecast.get("next_forecast") or {}
     sentiment = data.get("market_sentiment") or {}
+    company_risk = data.get("company_risk") or {}
     confidence = _number((forecast.get("confidence") or {}).get("score"))
     change_pct = _number(quote.get("change_pct"))
     technical_score = _number(technical.get("score"))
@@ -94,6 +95,40 @@ def scan(data: dict, thresholds: dict) -> dict:
             "tier": _tier(max(abs(predicted_return), abs(technical_score) / 100), max(forecast_threshold, 0.65)),
         })
 
+    detected_risks = list(company_risk.get("detected") or [])
+    if detected_risks:
+        evidence = []
+        evidence_identity = []
+        for category in detected_risks[:6]:
+            item = (category.get("evidence") or [{}])[0]
+            detail = item.get("title") or category.get("description") or "公开来源命中风险线索"
+            evidence.append(f"{category.get('label')}：{detail} · {item.get('source') or '公开来源'}")
+            evidence_identity.append(f"{category.get('key')}:{item.get('url') or detail}")
+        labels = "、".join(item.get("label") or item.get("key") for item in detected_risks[:4])
+        if len(detected_risks) > 4:
+            labels += f"等 {len(detected_risks)} 项"
+        risk_score = _number(company_risk.get("priority_score"), 60.0)
+        risk_sources = [str(item.get("name")) for item in (company_risk.get("sources") or []) if item.get("name")]
+        event_key = hashlib.sha256("|".join(evidence_identity).encode("utf-8")).hexdigest()[:10]
+        existing = next((item for item in matches if item["category"] == "risk"), None)
+        if existing:
+            existing["score"] = round(max(existing["score"], risk_score), 2)
+            existing["summary"] = f"{existing['summary']} · 公开证据命中 {labels}"
+            existing["evidence"] = list(dict.fromkeys(existing["evidence"] + evidence))
+            existing["tier"] = max(existing["tier"], _tier(risk_score, 60.0))
+            existing["event_key"] = event_key
+            existing["source"] = " / ".join(risk_sources) if risk_sources else existing.get("source")
+            existing["as_of"] = company_risk.get("as_of")
+        else:
+            matches.append({
+                "category": "risk", "direction": "down", "score": round(risk_score, 2),
+                "trigger": "company_risk_evidence", "title": f"{asset.get('symbol')} 发现风险证据",
+                "summary": f"公开来源命中 {labels}；未命中项目不代表风险不存在",
+                "evidence": evidence, "tier": _tier(risk_score, 60.0), "event_key": event_key,
+                "source": " / ".join(risk_sources) if risk_sources else "公开风险来源",
+                "as_of": company_risk.get("as_of"),
+            })
+
     priority = {"risk": 3, "anomaly": 2, "potential": 1}
     primary = max(matches, key=lambda item: (priority[item["category"]], item["score"])) if matches else None
     status = {
@@ -106,13 +141,13 @@ def scan(data: dict, thresholds: dict) -> dict:
     source = quote.get("source") or "market provider"
     alerts = []
     for match in matches:
-        raw_id = f"{asset.get('market')}:{asset.get('symbol')}:{match['category']}:{match['direction']}:{session_key}:{match['tier']}"
+        raw_id = f"{asset.get('market')}:{asset.get('symbol')}:{match['category']}:{match['direction']}:{session_key}:{match['tier']}:{match.get('event_key') or ''}"
         alerts.append({
             "id": "alert_" + hashlib.sha256(raw_id.encode("utf-8")).hexdigest()[:18],
             "asset": asset, "category": match["category"], "direction": match["direction"],
             "severity": "high" if match["score"] >= 85 else "medium" if match["score"] >= 60 else "info",
             "title": match["title"], "summary": match["summary"], "evidence": match["evidence"],
-            "score": match["score"], "source": source, "as_of": quote.get("as_of"),
+            "score": match["score"], "source": match.get("source") or source, "as_of": match.get("as_of") or quote.get("as_of"),
             "target_time": next_forecast.get("target_time") if match["trigger"] == "forward_forecast" else None, "horizon_label": forecast.get("horizon_label") if match["trigger"] == "forward_forecast" else None,
             "model_method": forecast.get("method"), "signal_version": 2,
         })
@@ -122,6 +157,11 @@ def scan(data: dict, thresholds: dict) -> dict:
         "technical": {"score": technical.get("score"), "stance": technical.get("stance"), "relative_volume": technical.get("relative_volume")},
         "forecast": {"status": forecast.get("status"), "predicted_return_pct": next_forecast.get("predicted_return_pct"), "predicted_price": next_forecast.get("predicted_price"), "target_time": next_forecast.get("target_time"), "horizon_label": forecast.get("horizon_label"), "confidence": (forecast.get("confidence") or {}).get("score"), "publishable": next_forecast.get("publishable"), "profile": (forecast.get("ensemble") or {}).get("profile")},
         "market_sentiment": {"score": sentiment.get("score"), "label": sentiment.get("label"), "confidence": sentiment.get("confidence")},
+        "company_risk": {
+            "status": company_risk.get("status"), "priority_score": company_risk.get("priority_score"),
+            "detected_count": company_risk.get("detected_count"), "detected": detected_risks,
+            "as_of": company_risk.get("as_of"), "disclaimer": company_risk.get("disclaimer"),
+        },
         "status": status,
         "matches": matches,
         "alerts": alerts,

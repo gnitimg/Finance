@@ -11,7 +11,7 @@ function chartRuntime() {
       core.use([
         charts.BarChart, charts.LineChart, charts.ScatterChart,
         components.DataZoomComponent, components.GridComponent, components.LegendComponent,
-        components.MarkAreaComponent, components.TooltipComponent, renderers.CanvasRenderer,
+        components.MarkAreaComponent, components.MarkLineComponent, components.TooltipComponent, renderers.CanvasRenderer,
       ])
       return core
     })
@@ -73,7 +73,7 @@ function stored(key, fallback) {
 }
 
 const state = reactive({
-  market: 'us', symbol: 'NVDA', period: periods[3], analysis: null,
+  market: 'us', symbol: 'NVDA', period: periods[0], analysis: null,
   overview: [], health: null, loading: true, modelLoading: false, live: false, monitoring: false,
   lastSync: null, monitorAt: null, streamRefresh: 5, stablecoin: null, news: null,
 })
@@ -125,9 +125,27 @@ const data = computed(() => state.analysis?.data || {})
 const asset = computed(() => data.value.asset || {})
 const quote = computed(() => data.value.quote || {})
 const technical = computed(() => data.value.technical || {})
+const dynamicLevels = computed(() => {
+  if (technical.value.dynamic_levels?.length) return technical.value.dynamic_levels
+  return (technical.value.levels || []).slice(0, 4).map((level) => ({ ...level, window_label: '最近 20 根 BAR', method_label: levelLabel(level.label), source: quote.value.source || '行情数据源' }))
+})
 const forecast = computed(() => data.value.ml_forecast || {})
 const marketSentiment = computed(() => data.value.market_sentiment || state.news?.market_sentiment || {})
+const companyRisk = computed(() => state.news?.company_risk || data.value.company_risk || {})
+const detectedRisks = computed(() => companyRisk.value.detected || [])
+const riskSources = computed(() => (companyRisk.value.sources || []).map((item) => item.name).filter(Boolean).join(' / '))
 const backtestStats = ref({ hits: 0, total: 0 })
+const sectorInfo = computed(() => data.value.sector || null)
+const sectorRows = computed(() => {
+  const sector = sectorInfo.value
+  if (!sector) return []
+  const rows = []
+  if (sector.board_change_pct !== null && sector.board_change_pct !== undefined) rows.push({ label: '板块涨跌', value: `${sector.board_change_pct >= 0 ? '+' : ''}${number(sector.board_change_pct)}%`, tone: sector.board_change_pct >= 0 ? 'positive' : 'negative' })
+  if (sector.board_momentum_20 !== null && sector.board_momentum_20 !== undefined) rows.push({ label: '板块 20 日动量', value: `${sector.board_momentum_20 >= 0 ? '+' : ''}${number(sector.board_momentum_20 * 100)}%`, tone: sector.board_momentum_20 >= 0 ? 'positive' : 'negative' })
+  if (sector.board_main_net !== null && sector.board_main_net !== undefined) rows.push({ label: '板块主力', value: `${sector.board_main_net >= 0 ? '+' : '-'}${compact(Math.abs(sector.board_main_net))}`, tone: sector.board_main_net >= 0 ? 'positive' : 'negative' })
+  if (sector.index_return_1 !== null && sector.index_return_1 !== undefined) rows.push({ label: '沪深300', value: `${sector.index_return_1 >= 0 ? '+' : ''}${number(sector.index_return_1 * 100)}%`, tone: sector.index_return_1 >= 0 ? 'positive' : 'negative' })
+  return rows
+})
 const changeClass = computed(() => Number(quote.value.change_pct || 0) >= 0 ? 'positive' : 'negative')
 const openChangePct = computed(() => {
   const open = Number(quote.value.open)
@@ -206,6 +224,12 @@ function signalLabel(value) {
 }
 function levelLabel(value) {
   return ({ '20-bar low': '20 BAR 低点', '20-bar high': '20 BAR 高点' })[value] || value
+}
+function riskStatusLabel(value) {
+  return ({ detected: '命中', no_evidence: '未命中', source_limited: '来源受限', unavailable: '待连接', not_applicable: '不适用' })[value] || '监测中'
+}
+function riskSeverityLabel(value) {
+  return ({ high: '高优先级', medium: '中优先级', info: '提示' })[value] || '证据'
 }
 function chartAxisLabel(value, index, chartData) {
   const raw = String(value || '')
@@ -482,6 +506,12 @@ function loadAssetContext(activeKey, assetType) {
     if (news.data?.market_sentiment && state.analysis?.data) {
       state.analysis.data.market_sentiment = news.data.market_sentiment
     }
+    if (news.data?.sector && state.analysis?.data) {
+      state.analysis.data.sector = news.data.sector
+    }
+    if (news.data?.company_risk && state.analysis?.data) {
+      state.analysis.data.company_risk = news.data.company_risk
+    }
   }).catch(() => {})
   if (assetType === 'stablecoin') {
     fetchJson(`/api/stablecoin?symbol=${encodeURIComponent(symbol)}`).then((risk) => {
@@ -576,6 +606,7 @@ async function renderChart() {
   if (!chartEl.value || !data.value.history?.length) return
   if (!chart) chart = echarts.init(chartEl.value, null, { renderer: 'canvas' })
   const chartData = buildChartData(data.value.history, forecast.value)
+  const levelLines = dynamicLevels.value.filter((level) => Number.isFinite(Number(level.value)))
   backtestStats.value = chartData.backtestStats || { hits: 0, total: 0 }
   chart.setOption({
     animationDuration: 450,
@@ -597,7 +628,7 @@ async function renderChart() {
       { type: 'slider', xAxisIndex: [0, 1], filterMode: 'none', bottom: 0, height: 16, showDetail: false, borderColor: '#354036', backgroundColor: '#0c100d', fillerColor: 'rgba(184,255,90,.10)', dataBackground: { lineStyle: { color: '#647065', opacity: .55 }, areaStyle: { color: '#252d27', opacity: .45 } }, selectedDataBackground: { lineStyle: { color: '#b8ff5a', opacity: .8 }, areaStyle: { color: '#b8ff5a', opacity: .12 } }, handleStyle: { color: '#b8ff5a', borderColor: '#b8ff5a' }, moveHandleStyle: { color: '#778278' }, emphasis: { handleStyle: { color: '#edf1e8' }, moveHandleStyle: { color: '#b8ff5a' } } },
     ],
     series: [
-      { name: '实际价格', type: 'line', data: chartData.closes, showSymbol: false, smooth: 0.12, lineStyle: { color: '#b8ff5a', width: 2.5 }, areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(184,255,90,.17)' }, { offset: 1, color: 'rgba(184,255,90,0)' }] } }, emphasis: { disabled: true }, z: 4 },
+      { name: '实际价格', type: 'line', data: chartData.closes, showSymbol: false, smooth: 0.12, lineStyle: { color: '#b8ff5a', width: 2.5 }, areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(184,255,90,.17)' }, { offset: 1, color: 'rgba(184,255,90,0)' }] } }, markLine: levelLines.length ? { silent: true, animation: false, symbol: ['none', 'none'], data: levelLines.map((level) => { const support = level.kind === 'support'; const color = support ? 'rgba(184,255,90,.54)' : 'rgba(255,107,104,.54)'; return { name: level.label, yAxis: Number(level.value), lineStyle: { color, width: level.horizon === 'ultra_short' ? 1.25 : 1, type: level.horizon === 'ultra_short' ? 'solid' : 'dashed' }, label: { show: true, position: 'insideEndTop', formatter: `${level.short_label || level.label}  ${number(level.value, Number(level.value) < 10 ? 3 : 2)}`, color: support ? '#b8ff5a' : '#ff7773', backgroundColor: 'rgba(12,16,13,.88)', padding: [2, 4], fontSize: 9 } } }) } : undefined, emphasis: { disabled: true }, z: 4 },
       { name: '滚动前瞻', type: 'line', data: fullForecast.value ? chartData.backtest : [], showSymbol: false, connectNulls: false, lineStyle: { color: '#8070c9', width: 1.5, type: 'dashed', opacity: .72 }, emphasis: { disabled: true }, z: 5 },
       { name: '方向踏空', type: 'scatter', data: fullForecast.value ? chartData.backtestMisses : [], symbol: 'path://M-6,-6L6,6M6,-6L-6,6', symbolSize: 9, itemStyle: { color: '#ff6b68' }, tooltip: { show: false }, emphasis: { disabled: true }, z: 8 },
       { name: '前瞻区间下界', type: 'line', data: chartData.futureLower, stack: 'forecast-interval', showSymbol: false, connectNulls: true, silent: true, lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 }, emphasis: { disabled: true }, z: 1 },
@@ -636,7 +667,7 @@ async function bootstrap() {
 
 function resizeChart() { chart?.resize() }
 
-watch(() => [forecast.value.series, data.value.history, fullForecast.value], () => nextTick(renderChart), { deep: false })
+watch(() => [forecast.value.series, data.value.history, technical.value.dynamic_levels, fullForecast.value], () => nextTick(renderChart), { deep: false })
 onMounted(() => {
   restoreAlertQueue()
   bootstrap()
@@ -753,7 +784,7 @@ onBeforeUnmount(() => {
 
         <aside class="panel signal-panel">
           <div class="panel-head"><div><span class="section-index">02</span><h3>信号台</h3></div><span class="stance" :class="technical.stance">{{ stanceLabel(technical.stance) }}</span></div>
-          <div class="signal-score"><span>综合信号</span><strong>{{ technical.score ?? '—' }}</strong><div><i :style="{ width: `${Math.abs(technical.score || 0)}%`, marginLeft: Number(technical.score || 0) >= 0 ? '50%' : `${50 - Math.abs(technical.score || 0) / 2}%` }"></i></div></div>
+          <div class="signal-score"><span>综合信号</span><strong>{{ technical.score ?? '—' }}</strong><div><i :style="{ width: `${Math.abs(technical.score || 0) / 2}%`, marginLeft: Number(technical.score || 0) >= 0 ? '50%' : `${50 - Math.abs(technical.score || 0) / 2}%` }"></i></div></div>
           <ul class="signal-list">
             <li v-for="signal in technical.signals?.slice(0, 5)" :key="signal.key">
               <i :class="signal.direction"></i><span>{{ signalLabel(signal.label) }}</span><em>{{ signal.direction === 'bullish' ? '强' : signal.direction === 'bearish' ? '弱' : '中性' }}</em>
@@ -764,7 +795,12 @@ onBeforeUnmount(() => {
         </aside>
 
         <article class="panel metric-panel">
-          <div class="panel-head"><div><span class="section-index">03</span><h3>市场剖面</h3></div></div>
+          <div class="panel-head">
+            <div><span class="section-index">03</span><h3>市场剖面</h3></div>
+            <button type="button" class="info-mark" aria-label="查看支撑位与压力位说明">i
+              <span class="info-popover" role="tooltip"><strong>动态价位如何计算</strong><em>超短线</em><p>分钟线约观察最近 1 小时；日线观察最近 5 个交易日，适合盘中节奏。</p><em>短线</em><p>分钟线约观察最近 4 小时；日线观察最近 20 个交易日，适合当前波段。</p><small>支撑与压力只使用当前时点之前的 K 线，以已确认局部转折、EMA 与 ATR14 计算；实线为超短线，虚线为短线，不是买卖承诺。</small></span>
+            </button>
+          </div>
           <div class="metrics">
             <div><span>开盘价</span><strong>{{ number(quote.open, 3) }}</strong></div>
             <div><span>日内高点</span><strong>{{ number(quote.high, 3) }}</strong></div>
@@ -776,9 +812,12 @@ onBeforeUnmount(() => {
             <div><span>ATR</span><strong>{{ number(technical.atr_pct, 2) }}<small>%</small></strong></div>
             <div><span>年化波动</span><strong>{{ number(technical.annualized_volatility_pct, 1) }}<small>%</small></strong></div>
           </div>
-          <div class="levels">
-            <div v-for="level in technical.levels?.slice(0, 4)" :key="`${level.label}:${level.value}`">
-              <span>{{ levelLabel(level.label) }}</span><i :class="level.kind"></i><strong>{{ number(level.value, 3) }}</strong><em>{{ level.kind === 'support' ? '支撑' : '阻力' }}</em>
+          <div class="levels dynamic-levels">
+            <div v-for="level in dynamicLevels" :key="`${level.label}:${level.value}`" :class="[level.kind, level.horizon]">
+              <div><i :class="level.kind"></i><span>{{ level.label }}</span><em>{{ level.horizon === 'ultra_short' ? '实线' : '虚线' }}</em></div>
+              <strong>{{ number(level.value, Number(level.value) < 10 ? 3 : 2) }}</strong>
+              <b :class="level.kind">距现价 {{ Number(level.distance_pct || 0) >= 0 ? '+' : '' }}{{ number(level.distance_pct, 2) }}%</b>
+              <small>{{ level.window_label }} · {{ level.method_label }}<template v-if="level.touches"> · {{ level.touches }} 次接触</template><br>{{ quote.source || '行情数据源' }} · {{ dateTime(level.as_of || technical.levels_method?.as_of) }}</small>
             </div>
           </div>
         </article>
@@ -848,7 +887,45 @@ onBeforeUnmount(() => {
               <em>{{ factor.source || '当前源未覆盖' }}</em>
             </div>
           </div>
+          <div v-if="sectorInfo && sectorInfo.industry" class="sector-panel">
+            <div class="sector-head"><span>相关板块 · {{ marketLabel(state.market) }}</span><strong>{{ sectorInfo.board_name || sectorInfo.industry }}</strong></div>
+            <div class="sector-rows">
+              <div v-for="row in sectorRows" :key="row.label"><span>{{ row.label }}</span><strong :class="row.tone">{{ row.value }}</strong></div>
+            </div>
+            <div class="sector-heat">
+              <span>板块热度榜（当日）</span>
+              <div class="heat-chips">
+                <i v-for="board in (sectorInfo.top_boards || []).slice(0, 6)" :key="board.code" :class="(board.change_pct || 0) >= 0 ? 'up' : 'down'">{{ board.name }} {{ board.change_pct >= 0 ? '+' : '' }}{{ number(board.change_pct) }}%</i>
+              </div>
+            </div>
+            <small class="sector-source">{{ sectorInfo.source || 'East Money' }} · {{ dateTime(sectorInfo.as_of) }}</small>
+          </div>
+          <div v-else-if="state.market === 'cn'" class="sector-panel"><p class="sector-empty">板块数据正在后台就绪，不影响当前行情与模型运行。</p></div>
         </div>
+        <section v-if="companyRisk.applicable !== false && asset.market" class="risk-console" aria-labelledby="risk-console-title">
+          <header class="risk-head">
+            <div><span>PUBLIC RISK EVIDENCE</span><h4 id="risk-console-title">风险证据监测</h4><p>公开消息、监管事件与资金流线索；财报类项目会单独标记来源覆盖。</p></div>
+            <div class="risk-score">
+              <span>证据优先级</span><strong :class="detectedRisks.length ? 'negative' : ''">{{ number(companyRisk.priority_score, 0) }}</strong><em>/100 · 非发生概率</em>
+              <button type="button" class="info-mark" aria-label="查看风险监测说明">i
+                <span class="info-popover risk-info" role="tooltip"><strong>状态说明</strong><em>命中</em><p>当前来源存在可回溯的标题或资金流证据。</p><em>未命中</em><p>已检查的来源暂未发现对应词项，不代表风险不存在。</p><em>来源受限</em><p>商誉、存贷双高、坏账等仍需结构化财报与正式公告复核。</p></span>
+              </button>
+            </div>
+          </header>
+          <div v-if="detectedRisks.length" class="risk-hits">
+            <article v-for="risk in detectedRisks" :key="risk.key" :class="risk.severity">
+              <div><span>{{ risk.label }}</span><em>{{ riskSeverityLabel(risk.severity) }}</em></div>
+              <template v-if="risk.evidence?.[0]">
+                <a v-if="risk.evidence[0].url" :href="safeUrl(risk.evidence[0].url)" target="_blank" rel="noopener noreferrer">{{ risk.evidence[0].title }} ↗</a>
+                <p v-else>{{ risk.evidence[0].title }}</p>
+                <small>{{ risk.evidence[0].source || '公开来源' }} · {{ dateTime(risk.evidence[0].published_at) }}<template v-if="risk.evidence_count > 1"> · 另 {{ risk.evidence_count - 1 }} 条</template></small>
+              </template>
+            </article>
+          </div>
+          <div class="risk-matrix" aria-label="风险监测类别及覆盖状态">
+            <div v-for="risk in companyRisk.categories" :key="risk.key" :class="risk.status" :title="risk.description"><span>{{ risk.label }}</span></div>
+          </div>
+        </section>
         <div v-if="state.news?.items?.length" class="news-list">
           <a v-for="item in state.news.items.slice(0, 6)" :key="item.url || item.title" :href="safeUrl(item.url)" target="_blank" rel="noopener noreferrer">
             <span>{{ item.source }}</span><h4>{{ item.title }}</h4><em>{{ item.published_at || '时间未提供' }} ↗</em>

@@ -16,8 +16,11 @@ FEATURE_NAMES = [
     "volume_impulse", "volatility_ratio", "candle_streak", "up_ratio_10",
     "body_pct", "body_dominance", "upper_shadow", "lower_shadow", "gap_open", "inside_bar",
     "flow_z", "flow_trend_3d",
+    "index_return_1", "index_momentum_20",
+    "sector_return_1", "sector_momentum_20", "stock_vs_sector_1",
 ]
-STATE_VERSION = 13
+MARKET_REFERENCE_FEATURES = FEATURE_NAMES[-5:]
+STATE_VERSION = 14
 MIN_SAMPLES = 15
 # Recency bounds keep the kNN analogue and the per-step path fits affordable
 # on long training contexts without changing their short-memory character.
@@ -77,7 +80,7 @@ def _horizon_label(interval: str, horizon: int) -> str:
     return f"{horizon} 个 BAR"
 
 
-def _features(bars: list[dict], index: int, flow_value: tuple[float, float] | None = None) -> list[float] | None:
+def _features(bars: list[dict], index: int, flow_value: tuple[float, float] | None = None, ref_row: dict | None = None) -> list[float] | None:
     if index < 20:
         return None
     closes = [float(bars[i]["close"]) for i in range(index - 20, index + 1)]
@@ -117,6 +120,16 @@ def _features(bars: list[dict], index: int, flow_value: tuple[float, float] | No
         else:
             break
     up_ratio_10 = sum(1.0 for flag in up_flags[-10:] if flag > 0) / 10.0 - 0.5
+    reference = ref_row or {}
+    index_return = float(reference.get("index_return_1") or 0.0)
+    index_momentum = float(reference.get("index_momentum_20") or 0.0)
+    sector_return = float(reference.get("sector_return_1") or 0.0)
+    sector_momentum = float(reference.get("sector_momentum_20") or 0.0)
+    # Missing board history is neutral. A genuine zero-return board is still a
+    # valid reference and therefore leaves the stock's own return as relative
+    # strength, exactly as stock_return - sector_return.
+    sector_available = bool(reference.get("sector_available")) or "sector_return_1" in reference
+    relative_strength = returns[-1] - sector_return if sector_available else 0.0
     return [
         returns[-1],
         price / closes[-3] - 1,
@@ -146,13 +159,18 @@ def _features(bars: list[dict], index: int, flow_value: tuple[float, float] | No
         1.0 if bar_high <= bars[index - 1].get("high", bar_high) and bar_low >= bars[index - 1].get("low", bar_low) else 0.0,
         flow_value[0] if flow_value else 0.0,
         flow_value[1] if flow_value else 0.0,
+        index_return,
+        index_momentum,
+        sector_return,
+        sector_momentum,
+        relative_strength,
     ]
 
 
-def build_samples(bars: list[dict], horizon: int = 3, flow_by_index: list | None = None) -> list[dict]:
+def build_samples(bars: list[dict], horizon: int = 3, flow_by_index: list | None = None, ref_by_index: list | None = None) -> list[dict]:
     samples = []
     for index in range(20, len(bars) - horizon):
-        features = _features(bars, index, flow_by_index[index] if flow_by_index else None)
+        features = _features(bars, index, flow_by_index[index] if flow_by_index else None, ref_by_index[index] if ref_by_index else None)
         origin = float(bars[index]["close"])
         target = float(bars[index + horizon]["close"])
         if features is None or origin <= 0 or target <= 0:
@@ -194,6 +212,45 @@ def flow_series_by_index(dates: list[str], flow: list[dict] | None) -> list[tupl
         trend_window = mains[max(0, pointer - 2):pointer + 1]
         trend = sum(trend_window) / (std * math.sqrt(len(trend_window)))
         features.append((z, trend))
+    return features
+
+
+def ref_series_by_index(dates: list[str], sector_rows: list[dict] | None, index_rows: list[dict] | None) -> list[dict]:
+    """Causal per-bar market-reference features (industry board + broad index).
+
+    Each bar only sees rows dated on or before it, mirroring the flow mapping.
+    Board and index series advance on independent pointers so one stale series
+    never corrupts the other.
+    """
+    def _pointer_for(series_dates: list[str], bar_date: str, pointer: int) -> int:
+        while pointer + 1 < len(series_dates) and series_dates[pointer + 1] <= bar_date:
+            pointer += 1
+        return pointer
+
+    sector = sector_rows or []
+    index = index_rows or []
+    if not sector and not index:
+        return [{}] * len(dates)
+    sector_dates = [str(row["date"]) for row in sector]
+    index_dates = [str(row["date"]) for row in index]
+    features = []
+    sector_pointer = index_pointer = -1
+    for bar_date in dates:
+        row: dict = {}
+        if sector:
+            sector_pointer = _pointer_for(sector_dates, bar_date, sector_pointer)
+            if sector_pointer >= 0:
+                matched = sector[sector_pointer]
+                row["sector_return_1"] = float(matched.get("return_1") or 0.0)
+                row["sector_momentum_20"] = float(matched.get("momentum_20") or 0.0)
+                row["sector_available"] = True
+        if index:
+            index_pointer = _pointer_for(index_dates, bar_date, index_pointer)
+            if index_pointer >= 0:
+                matched = index[index_pointer]
+                row["index_return_1"] = float(matched.get("return_1") or 0.0)
+                row["index_momentum_20"] = float(matched.get("momentum_20") or 0.0)
+        features.append(row)
     return features
 
 
@@ -406,17 +463,25 @@ def _live_context_return(live_context: dict | None, features: list[float], horiz
     abnormal_signal = abnormal_direction * max(0.0, min(1.0, float(abnormal.get("score") or 0) / 100))
     flow = context.get("flow") or {}
     book = context.get("book") or {}
+    sector = context.get("sector") or {}
     flow_raw = flow.get("zscore")
     flow_signal = max(-1.0, min(1.0, float(flow_raw) / 3.0)) if flow_raw is not None else None
     book_raw = book.get("imbalance")
     book_signal = max(-1.0, min(1.0, float(book_raw))) if book_raw is not None else None
+    board_now = sector.get("board_change_pct")
+    board_gap = sector.get("board_ma20_gap")
+    sector_signal = None
+    if board_now is not None or board_gap is not None:
+        sector_signal = max(-1.0, min(1.0, (float(board_now or 0) / 2.0) + (float(board_gap or 0) * 2.0)))
     # Present-only weighted blend, so a market without order-book or flow
     # coverage falls back to the sentiment/abnormal pair.
-    terms = [(score, 0.62), (abnormal_signal, 0.18)]
+    terms = [(score, 0.60), (abnormal_signal, 0.18)]
     if flow_signal is not None:
-        terms.append((flow_signal, 0.12))
+        terms.append((flow_signal, 0.10))
     if book_signal is not None:
-        terms.append((book_signal, 0.08))
+        terms.append((book_signal, 0.06))
+    if sector_signal is not None:
+        terms.append((sector_signal, 0.06))
     weight_sum = sum(weight for _value, weight in terms)
     evidence_signal = sum(value * weight for value, weight in terms) / weight_sum
     volatility = max(abs(features[9]), abs(features[0]) * .65, .00035)
@@ -429,8 +494,9 @@ def _live_context_return(live_context: dict | None, features: list[float], horiz
         "score": round(score * 100, 2), "confidence": round(confidence * 100, 2),
         "flow_signal": None if flow_signal is None else round(flow_signal, 4),
         "book_signal": None if book_signal is None else round(book_signal, 4),
+        "sector_signal": None if sector_signal is None else round(sector_signal, 4),
         "return_contribution_pct": round((math.exp(estimate) - 1) * 100, 5),
-        "method": "price_volume_technical_related_content_flow_orderbook",
+        "method": "price_volume_technical_related_content_flow_orderbook_sector",
     }
 
 
@@ -626,14 +692,19 @@ def _forward_path(bars: list[dict], times: list[str], base_horizon: int, base_re
     return result, len(anchor_returns)
 
 
-def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", horizon: int = 3, to_session_close: bool = False, asset_type: str | None = None, live_context: dict | None = None, flow: list[dict] | None = None) -> dict:
+def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", horizon: int = 3, to_session_close: bool = False, asset_type: str | None = None, live_context: dict | None = None, flow: list[dict] | None = None, market_ref: tuple[list[dict], list[dict]] | list[dict] | None = None) -> dict:
     # Flow rows are daily; they become training features only for daily bars
     # where the row is complete at the bar's close. Intraday models see today's
     # running flow through the live context instead.
     flow_by_index = None
     if flow and interval == "1d":
         flow_by_index = flow_series_by_index([str(bar.get("time", ""))[:10] for bar in bars], flow)
-    samples = build_samples(bars, horizon, flow_by_index)
+    ref_by_index = None
+    if market_ref and interval == "1d":
+        sector_rows, index_rows = market_ref if isinstance(market_ref, tuple) else (market_ref, None)
+        ref_by_index = ref_series_by_index([str(bar.get("time", ""))[:10] for bar in bars], sector_rows, index_rows)
+    reference_active = bool(ref_by_index and any(any(name in row for name in MARKET_REFERENCE_FEATURES) for row in ref_by_index))
+    samples = build_samples(bars, horizon, flow_by_index, ref_by_index)
     if len(samples) < MIN_SAMPLES:
         return {"status": "insufficient_data", "required_samples": MIN_SAMPLES, "available_samples": len(samples), "series": {"predicted": [], "actual": []}}
     # Train on the earlier 60% and walk the most recent 40% chronologically;
@@ -661,6 +732,9 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
         round(float((context.get("abnormal") or {}).get("score") or 0) / 10.0),
         round(float((context.get("flow") or {}).get("zscore") or 0), 1),
         round(float((context.get("book") or {}).get("imbalance") or 0), 2),
+        round(float((context.get("sector") or {}).get("board_change_pct") or 0), 2),
+        round(float((context.get("sector") or {}).get("board_ma20_gap") or 0), 4),
+        [round(float((ref_by_index[-1] if ref_by_index else {}).get(name) or 0), 6) for name in MARKET_REFERENCE_FEATURES],
     ], ensure_ascii=False)
     valid_state = bool(
         state
@@ -796,7 +870,7 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
         capped_by_validation = confidence > 34.0
         confidence = min(confidence, 34.0)
     grade = "high" if confidence >= 70 else "medium" if confidence >= 48 else "low"
-    latest_features = _features(bars, len(bars) - 1, flow_by_index[-1] if flow_by_index else None)
+    latest_features = _features(bars, len(bars) - 1, flow_by_index[-1] if flow_by_index else None, ref_by_index[-1] if ref_by_index else None)
     if latest_features:
         ridge_return = _clip_return(_predict(weights, _vector(latest_features, means, scales)), component_cap) or 0.0
         analogue_return = _clip_return(_analogue_return(samples, latest_features, means, scales), component_cap)
@@ -824,18 +898,18 @@ def forecast(bars: list[dict], market: str, symbol: str, interval: str = "1d", h
     terminal_return_pct = (float(terminal["value"]) / latest_price - 1) * 100
     result = {
         "status": "ready",
-        "method": "adaptive_market_ensemble_sentiment_path_v13",
+        "method": "adaptive_market_ensemble_sentiment_path_v14",
         "horizon_bars": len(future_times) if to_session_close else horizon,
         "horizon_label": display_horizon_label,
         "calibration_horizon_bars": horizon,
         "calibration_horizon_label": _horizon_label(interval, horizon),
-        "training": {"initial_samples": len(train), "base_samples": state.get("base_samples", len(train)), "evaluation_samples": len(validation), "validation_window_limit": VALIDATION_WINDOW, "online_updates": state["updates"], "last_matured_at": state.get("last_matured_at"), "refresh_trigger": "each newly observed bar", "state_version": STATE_VERSION},
+        "training": {"initial_samples": len(train), "base_samples": state.get("base_samples", len(train)), "evaluation_samples": len(validation), "validation_window_limit": VALIDATION_WINDOW, "online_updates": state["updates"], "last_matured_at": state.get("last_matured_at"), "refresh_trigger": "each newly observed bar", "state_version": STATE_VERSION, "feature_count": len(FEATURE_NAMES), "market_reference_active": reference_active, "market_reference_features": MARKET_REFERENCE_FEATURES if reference_active else []},
         "evaluation": {"mean_absolute_error_pct": mae, "directional_accuracy": directional * 100, "no_change_error_pct": naive_mae, "skill_vs_no_change_pct": skill_vs_naive, "phase_lag_bars": phase_lag, "validation_passed": validation_passed, "samples": len(validation), "windows": windows},
         "confidence": {"score": confidence, "grade": grade, "kind": "historical_calibration_quality", "not_probability": True, "capped_by_validation": capped_by_validation, "basis": ["holdout directional accuracy", "skill versus no-change baseline", "matured sample count"]},
         "series": {"predicted": _free_running_series(predictions[-60:], horizon), "one_shot_predicted": predictions[-60:], "actual": actual[-60:]},
         "forward_series": forward_series,
         "next_forecast": {"origin_time": bars[-1]["time"], "origin_price": latest_price, "target_time": terminal["time"], "predicted_price": terminal["value"], "predicted_return_pct": terminal_return_pct, "lower_price": terminal.get("lower"), "upper_price": terminal.get("upper"), "horizon_bars": terminal["step"], "horizon_label": display_horizon_label, "publishable": publishable, "publication_damping": publication_damping, "components": next_components},
-        "ensemble": {"profile": profile, "state_scope": f"{market}:{symbol}:{interval}", "weights": _component_weights(component_errors, profile, component_directions, baseline_error_ema), "component_calibration": {name: {"error_ema": component_errors.get(name), "direction_ema_pct": None if component_directions.get(name) is None else component_directions[name] * 100} for name in component_errors}, "return_shrinkage": final_shrinkage, "amplitude_calibration": "causal_weighted_median_absolute_error", "component_return_cap": component_cap, "numerical_guard": f"winsorized_z_{MAX_STANDARD_SCORE:g}", "latest_regime_guarded": latest_regime_guarded, "historical_regime_guards": regime_guard_count, "live_context": live_context_meta, "components": ["regularized trend model", "similar historical regimes", "short-horizon velocity", "mean reversion", "live market sentiment"]},
+        "ensemble": {"profile": profile, "state_scope": f"{market}:{symbol}:{interval}", "weights": _component_weights(component_errors, profile, component_directions, baseline_error_ema), "component_calibration": {name: {"error_ema": component_errors.get(name), "direction_ema_pct": None if component_directions.get(name) is None else component_directions[name] * 100} for name in component_errors}, "return_shrinkage": final_shrinkage, "amplitude_calibration": "causal_weighted_median_absolute_error", "component_return_cap": component_cap, "numerical_guard": f"winsorized_z_{MAX_STANDARD_SCORE:g}", "latest_regime_guarded": latest_regime_guarded, "historical_regime_guards": regime_guard_count, "market_reference": {"active": reference_active, "scope": "daily_only", "source": "East Money industry board + CSI 300"}, "live_context": live_context_meta, "components": ["regularized trend model", "similar historical regimes", "short-horizon velocity", "mean reversion", "live market sentiment"]},
         "path": {"scope": "session_close" if to_session_close else "fixed_horizon", "points": len(forward_series), "direct_model_fits": path_model_fits, "interpolation": "cumulative_return_between_direct_horizon_models", "starts_at": bars[-1]["time"], "ends_at": terminal["time"], "updates_on_new_bar": True},
         "disclaimer": "Statistical estimate from historical bars; not a probability, guarantee, or trading instruction.",
     }

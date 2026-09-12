@@ -14,7 +14,8 @@ Finance intent and normalized asset
 Python deterministic engine
       ├─ provider + cache/stale policy
       ├─ quote / normalized history
-      ├─ indicators / risk / position math
+      ├─ indicators / dynamic support-pressure / position math
+      ├─ sourced 19-category listed-stock risk evidence
       ├─ anomaly + volume + range + related-content sentiment
       └─ market-adaptive ensemble path ML + matured-result feedback
       ↓
@@ -33,6 +34,12 @@ Routing gate
 - **L2 synthesis**: explicit comparison, trade-off, scenario, deep analysis, or decision support. Python runs first; only then may the optional specialist interpret the compact verified result.
 
 Material signal conflict is a routing hint, not automatic permission to call a model. Causal questions require news/event evidence; price action alone cannot establish a cause.
+
+## Risk evidence and dynamic levels
+
+Listed-stock risk screening records positive evidence only: related headlines cover public events and East Money main-force flow supplies a labeled proxy for large-order direction. Headline absence is `no_evidence`, while balance-sheet categories without structured statements are `source_limited`; neither is a safety conclusion. A new sourced risk hit joins the deterministic watchlist alert stream and remains in the notification center after the user closes its popup.
+
+Ultra-short and short support/pressure levels use only the current and preceding bars. Confirmed local swings and EMA anchors provide observed candidates; ATR14 supplies a clearly marked fallback when the correct side of the current price has no observed candidate. The API keeps the window, method, distance, touches, source, and timestamp with each level.
 
 ## Machine-learning feedback
 

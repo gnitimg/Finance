@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 
 import re
 
+from ..analyzers.company_risk import analyze as company_risk_analysis
 from ..cache import CACHE
 from ..http_client import request_bytes, request_json
 from ..models import FinanceError
@@ -45,7 +46,6 @@ def _eastmoney(market: str, symbol: str, limit: int) -> list[dict]:
             "summary": None,
         })
     return result
-from . import siliconflow
 from .sentiment import analyze as sentiment_analysis
 
 GDELT_FAILURE_THRESHOLD = 2
@@ -55,7 +55,9 @@ _GDELT_COOLDOWN_KEY = "news:gdelt:cooldown"
 
 
 def _news_cache_key(market: str, symbol: str) -> str:
-    return f"news:{market}:{symbol}"
+    # v2 excludes the former automatic remote reranker. Routine news and risk
+    # analysis must remain local/deterministic unless a user asks for L2.
+    return f"news:v2:{market}:{symbol}"
 
 
 def cached_news(market: str, symbol: str, max_age: int = 900) -> dict | None:
@@ -65,6 +67,13 @@ def cached_news(market: str, symbol: str, max_age: int = 900) -> dict | None:
     if not cached:
         return None
     cached["cache"] = cache_meta
+    cached["company_risk"] = company_risk_analysis(
+        cached.get("items") or [],
+        market=market,
+        entity=symbol,
+        news_providers=cached.get("providers_checked"),
+        as_of=cached.get("generated_at"),
+    )
     return cached
 
 
@@ -126,13 +135,14 @@ def get_news(market: str, symbol: str, limit: int = 12, related_name: str | None
         "yahoo": lambda: _yahoo(market, symbol, limit),
         "eastmoney": lambda: _eastmoney(market, symbol, limit),
     }
-    items, failures = [], []
+    items, failures, providers_checked = [], [], []
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(task): name for name, task in providers.items()}
         for future in as_completed(futures):
             name = futures[future]
             try:
                 items.extend(future.result())
+                providers_checked.append(name)
             except Exception as exc:
                 failures.append({"provider": name, "message": str(exc)[:180]})
     seen, unique = set(), []
@@ -144,23 +154,21 @@ def get_news(market: str, symbol: str, limit: int = 12, related_name: str | None
         unique.append(item)
     unique = unique[:limit]
     sentiment = sentiment_analysis(unique, entity=related_name or symbol)
-    if unique:
-        # Routine news scoring stays deterministic.  The optional SiliconFlow
-        # endpoint is a relevance reranker, not a generative analysis call.
-        scorer = siliconflow if siliconflow.enabled() else None
-        if scorer is not None:
-            try:
-                scores = scorer.score_items(unique)
-                sentiment = scorer.apply(sentiment, unique, scores)
-            except FinanceError as exc:
-                failures.append({"provider": scorer.__name__.split(".")[-1], "message": exc.message})
     result = {
         "asset": {"market": market, "symbol": symbol}, "items": unique,
         "sentiment": sentiment, "provider_failures": failures,
+        "providers_checked": sorted(providers_checked),
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "cache": {"cached": False, "stale": False, "age_seconds": 0},
         "warnings": ["Sentiment confidence measures source and keyword evidence quality; it is not a return probability."],
     }
+    result["company_risk"] = company_risk_analysis(
+        unique,
+        market=market,
+        entity=related_name or symbol,
+        news_providers=result["providers_checked"],
+        as_of=result["generated_at"],
+    )
     if unique:
         CACHE.set(cache_key, result)
         return result
@@ -168,6 +176,13 @@ def get_news(market: str, symbol: str, limit: int = 12, related_name: str | None
     if stale:
         stale["cache"] = stale_meta
         stale["provider_failures"] = failures
+        stale["company_risk"] = company_risk_analysis(
+            stale.get("items") or [],
+            market=market,
+            entity=related_name or symbol,
+            news_providers=stale.get("providers_checked"),
+            as_of=stale.get("generated_at"),
+        )
         stale["warnings"] = list(stale.get("warnings") or []) + ["Live news sources failed; serving an explicitly stale cache."]
         return stale
     return result

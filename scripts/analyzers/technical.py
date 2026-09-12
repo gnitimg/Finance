@@ -43,7 +43,110 @@ def atr(bars: list[dict], period: int = 14) -> float | None:
     return sum(ranges[-period:]) / period if len(ranges) >= period else None
 
 
-def analyze(bars: list[dict], current_price: float | None = None) -> dict:
+def _level_windows(interval: str | None) -> tuple[int, int, str, str]:
+    value = str(interval or "1d").lower()
+    if value.endswith("m") and value[:-1].isdigit():
+        minutes = max(1, int(value[:-1]))
+        ultra = max(6, min(18, round(60 / minutes)))
+        short = max(20, min(54, round(240 / minutes)))
+        return ultra, short, f"约 {ultra * minutes} 分钟", f"约 {short * minutes} 分钟"
+    if value in {"60m", "90m", "1h"}:
+        return 6, 20, "约 6 小时", "约 20 小时"
+    return 5, 20, "最近 5 个交易日", "最近 20 个交易日"
+
+
+def _pick_level(
+    bars: list[dict],
+    price: float,
+    atr_value: float | None,
+    *,
+    kind: str,
+    window: int,
+    horizon: str,
+    window_label: str,
+    interval: str | None,
+    exclude: float | None = None,
+) -> dict:
+    recent = bars[-max(3, min(window, len(bars))):]
+    lows = [float(bar.get("low") if bar.get("low") is not None else bar["close"]) for bar in recent]
+    highs = [float(bar.get("high") if bar.get("high") is not None else bar["close"]) for bar in recent]
+    closes = [float(bar["close"]) for bar in recent]
+    scale = max(float(atr_value or 0), abs(price) * .0025, 1e-9)
+    tolerance = max(scale * .18, abs(price) * .0007, 1e-9)
+    points = lows if kind == "support" else highs
+    candidates = []
+
+    for index in range(1, len(points) - 1):
+        left = points[max(0, index - 2):index]
+        right = points[index + 1:min(len(points), index + 3)]
+        is_turn = points[index] <= min(left + right) if kind == "support" else points[index] >= max(left + right)
+        if is_turn:
+            candidates.append({"value": points[index], "method": "局部转折", "recency": (index + 1) / len(points), "method_weight": 2.2})
+
+    candidates.append({
+        "value": min(lows) if kind == "support" else max(highs),
+        "method": "窗口极值",
+        "recency": 1.0,
+        "method_weight": .8,
+    })
+    average_period = max(3, min(20, len(closes) // 2))
+    average = ema_series(closes, average_period)[-1]
+    candidates.append({"value": average, "method": f"EMA{average_period}", "recency": 1.0, "method_weight": 1.3})
+
+    eligible = []
+    for candidate in candidates:
+        value = candidate["value"]
+        correct_side = value < price - tolerance * .1 if kind == "support" else value > price + tolerance * .1
+        if not correct_side or (exclude is not None and abs(value - exclude) <= tolerance):
+            continue
+        touches = sum(abs(point - value) <= tolerance for point in points)
+        proximity = max(0.0, 3.5 - abs(price - value) / scale)
+        score = touches * 1.65 + proximity + candidate["recency"] * 1.8 + candidate["method_weight"]
+        eligible.append({**candidate, "touches": touches, "score": score})
+
+    estimated = not eligible
+    if eligible:
+        selected = max(eligible, key=lambda item: (item["score"], -abs(price - item["value"])))
+        value = selected["value"]
+        method = selected["method"]
+        touches = selected["touches"]
+    else:
+        multiplier = .65 if horizon == "ultra_short" else 1.35
+        value = price + (scale * multiplier if kind == "resistance" else -scale * multiplier)
+        method = "ATR14 动态边界"
+        touches = 0
+
+    horizon_label = "超短线" if horizon == "ultra_short" else "短线"
+    kind_label = "支撑" if kind == "support" else "压力"
+    return {
+        "label": f"{horizon_label}{kind_label}",
+        "short_label": f"{'超短' if horizon == 'ultra_short' else '短线'}{'支' if kind == 'support' else '压'}",
+        "value": value,
+        "kind": kind,
+        "horizon": horizon,
+        "interval": interval or "1d",
+        "window_bars": len(recent),
+        "window_label": window_label,
+        "distance_pct": (value / price - 1) * 100 if price else None,
+        "touches": touches,
+        "method": "causal_swing_atr_v1",
+        "method_label": method,
+        "estimated_boundary": estimated,
+        "source": "行情 K 线 · ATR14 · 已确认局部转折",
+        "as_of": recent[-1].get("time") or recent[-1].get("timestamp"),
+    }
+
+
+def dynamic_levels(bars: list[dict], price: float, atr_value: float | None, interval: str | None = None) -> list[dict]:
+    ultra_window, short_window, ultra_label, short_label = _level_windows(interval)
+    ultra_support = _pick_level(bars, price, atr_value, kind="support", window=ultra_window, horizon="ultra_short", window_label=ultra_label, interval=interval)
+    ultra_resistance = _pick_level(bars, price, atr_value, kind="resistance", window=ultra_window, horizon="ultra_short", window_label=ultra_label, interval=interval)
+    short_support = _pick_level(bars, price, atr_value, kind="support", window=short_window, horizon="short", window_label=short_label, interval=interval, exclude=ultra_support["value"])
+    short_resistance = _pick_level(bars, price, atr_value, kind="resistance", window=short_window, horizon="short", window_label=short_label, interval=interval, exclude=ultra_resistance["value"])
+    return [ultra_support, ultra_resistance, short_support, short_resistance]
+
+
+def analyze(bars: list[dict], current_price: float | None = None, interval: str | None = None) -> dict:
     valid = [bar for bar in bars if bar.get("close") is not None]
     closes = [float(bar["close"]) for bar in valid]
     if len(closes) < 20:
@@ -118,6 +221,7 @@ def analyze(bars: list[dict], current_price: float | None = None) -> dict:
     levels = []
     for label, value in [("20-bar low", recent_low), ("20-bar high", recent_high)] + [(key.upper(), value) for key, value in averages.items() if value]:
         levels.append({"label": label, "value": value, "kind": "support" if value <= price else "resistance", "distance_pct": (value / price - 1) * 100})
+    live_levels = dynamic_levels(valid, price, atr_value, interval)
     material_conflict = len(bullish) >= 2 and len(bearish) >= 2
     return {
         "status": "ready",
@@ -133,5 +237,12 @@ def analyze(bars: list[dict], current_price: float | None = None) -> dict:
         "signals": signals,
         "facts": facts,
         "levels": sorted(levels, key=lambda item: abs(item["distance_pct"])),
+        "dynamic_levels": live_levels,
+        "levels_method": {
+            "name": "causal_swing_atr_v1",
+            "description": "仅使用当前时点及之前的 K 线，以已确认局部转折、EMA 与 ATR14 动态边界计算。",
+            "source": "当前行情 K 线",
+            "as_of": valid[-1].get("time") or valid[-1].get("timestamp"),
+        },
         "signal_conflict": {"material": material_conflict, "bullish": bullish, "bearish": bearish},
     }

@@ -70,6 +70,29 @@ function prefetchSiblings(market, symbol, currentKey) {
     delay += 2000
   }
 }
+
+const RISK_CONTEXT_TTL_MS = 5 * 60_000
+const riskContextAt = new Map()
+const riskContextPending = new Set()
+let riskContextChain = Promise.resolve()
+
+function scheduleRiskContext(assets) {
+  const now = Date.now()
+  for (const asset of assets) {
+    const [market, symbol] = String(asset).split(':', 2)
+    if (!['cn', 'hk', 'us'].includes(market) || !symbol) continue
+    const key = `${market}:${symbol}`
+    if (riskContextPending.has(key) || now - Number(riskContextAt.get(key) || 0) < RISK_CONTEXT_TTL_MS) continue
+    riskContextPending.add(key)
+    riskContextChain = riskContextChain
+      .then(() => runFinance(['risk-context', '--market', market, '--symbol', symbol, '--limit', '20'], { timeoutMs: 20_000 }))
+      .catch((error) => console.warn(`risk context ${key} unavailable: ${error.message}`))
+      .finally(() => {
+        riskContextAt.set(key, Date.now())
+        riskContextPending.delete(key)
+      })
+  }
+}
 async function cached(key, ttlMs, task) {
   const entry = memory.get(key)
   if (entry && Date.now() - entry.at < ttlMs) return entry.value
@@ -149,6 +172,7 @@ app.get('/api/monitor', async (req, res) => {
     const key = `monitor:${assets.join(',')}:${thresholds.forecast_pct}:${thresholds.price_change_pct}:${thresholds.volume_ratio}`
     const result = await cached(key, 8_000, () => runFinance(args, { timeoutMs: 45_000 }))
     res.json(result)
+    scheduleRiskContext(assets)
   } catch (error) { res.status(error.statusCode || 400).json(publicError(error)) }
 })
 
@@ -193,6 +217,8 @@ app.get('/api/stream', (req, res) => {
 })
 
 setInterval(() => broadcast('heartbeat', { at: new Date().toISOString() }), 10_000).unref()
+const initialRiskWarm = setTimeout(() => scheduleRiskContext(DEFAULT_ASSETS), 7_000)
+initialRiskWarm.unref()
 
 app.use('/api', (_req, res) => res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'unknown API endpoint' } }))
 

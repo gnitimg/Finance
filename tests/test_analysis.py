@@ -17,11 +17,17 @@ def bars(count=80):
 
 class AnalysisTests(unittest.TestCase):
     def test_indicators_are_finite_and_explainable(self):
-        result = analyze(bars())
+        result = analyze(bars(), interval="5m")
         self.assertEqual(result["status"], "ready")
         self.assertIsNotNone(result["rsi14"])
         self.assertTrue(result["signals"])
         self.assertTrue(all(level["kind"] in {"support", "resistance"} for level in result["levels"]))
+        self.assertEqual(len(result["dynamic_levels"]), 4)
+        self.assertEqual({level["horizon"] for level in result["dynamic_levels"]}, {"ultra_short", "short"})
+        self.assertTrue(all(level["source"] and level["window_label"] for level in result["dynamic_levels"]))
+        price = bars()[-1]["close"]
+        self.assertTrue(all(level["value"] <= price for level in result["dynamic_levels"] if level["kind"] == "support"))
+        self.assertTrue(all(level["value"] >= price for level in result["dynamic_levels"] if level["kind"] == "resistance"))
 
     def test_position_math(self):
         result = analyze_position(4.35, 1700, 5.839)

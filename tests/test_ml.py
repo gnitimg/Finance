@@ -56,7 +56,7 @@ class MLTests(unittest.TestCase):
                 self.assertEqual(first["next_forecast"]["horizon_label"], "15 分钟")
                 self.assertEqual(len(first["forward_series"]), 4)
                 self.assertTrue(first["path"]["updates_on_new_bar"])
-                self.assertEqual(first["method"], "adaptive_market_ensemble_sentiment_path_v13")
+                self.assertEqual(first["method"], "adaptive_market_ensemble_sentiment_path_v14")
                 self.assertEqual(set(first["ensemble"]["weights"]), {"ridge", "analogue", "trend", "reversion"})
                 self.assertGreater(first["ensemble"]["return_shrinkage"], 0)
                 self.assertIn("phase_lag_bars", first["evaluation"])
@@ -67,7 +67,8 @@ class MLTests(unittest.TestCase):
                 self.assertTrue(all("lower" in point and "upper" in point for point in first["forward_series"][1:]))
                 self.assertEqual(first["ensemble"]["state_scope"], "us:TEST:5m")
                 self.assertGreater(first["training"]["base_samples"], 0)
-                self.assertEqual(first["training"]["state_version"], 13)
+                self.assertEqual(first["training"]["state_version"], 14)
+                self.assertEqual(first["training"]["feature_count"], 33)
                 updates = first["training"]["online_updates"]
                 second = ml.forecast(synthetic(), "us", "TEST", "5m", 3)
                 self.assertEqual(second["training"]["online_updates"], updates)
@@ -130,7 +131,41 @@ class MLTests(unittest.TestCase):
         negative, _ = ml._live_context_return({"score": -65, "confidence": 80, "metrics": {"change_pct": -2}, "abnormal": {"score": 55}}, features, 3, "us_equity")
         self.assertGreater(positive, 0)
         self.assertLess(negative, 0)
-        self.assertEqual(metadata["method"], "price_volume_technical_related_content_flow_orderbook")
+        self.assertEqual(metadata["method"], "price_volume_technical_related_content_flow_orderbook_sector")
+
+    def test_v14_reference_features_are_33_dimensional_and_causal(self):
+        bars = synthetic()
+        neutral = ml._features(bars, 20)
+        reference = {
+            "index_return_1": .01,
+            "index_momentum_20": .02,
+            "sector_return_1": .003,
+            "sector_momentum_20": .04,
+            "sector_available": True,
+        }
+        featured = ml._features(bars, 20, ref_row=reference)
+        self.assertEqual(len(ml.FEATURE_NAMES), 33)
+        self.assertEqual(len(neutral), 33)
+        self.assertEqual(neutral[-5:], [0.0] * 5)
+        self.assertEqual(featured[-5:-1], [.01, .02, .003, .04])
+        self.assertAlmostEqual(featured[-1], featured[0] - .003)
+
+    def test_reference_series_never_looks_past_bar_date(self):
+        sector = [
+            {"date": "2026-01-02", "return_1": .01, "momentum_20": .10},
+            {"date": "2026-01-05", "return_1": -.02, "momentum_20": .07},
+        ]
+        index = [
+            {"date": "2026-01-01", "return_1": .003, "momentum_20": .04},
+            {"date": "2026-01-06", "return_1": .005, "momentum_20": .05},
+        ]
+        rows = ml.ref_series_by_index(["2025-12-31", "2026-01-01", "2026-01-03", "2026-01-06"], sector, index)
+        self.assertEqual(rows[0], {})
+        self.assertNotIn("sector_return_1", rows[1])
+        self.assertEqual(rows[1]["index_return_1"], .003)
+        self.assertEqual(rows[2]["sector_return_1"], .01)
+        self.assertEqual(rows[3]["sector_return_1"], -.02)
+        self.assertEqual(rows[3]["index_return_1"], .005)
 
     def test_standardization_clips_zero_variance_feature_spikes(self):
         row = ml._vector([10.0, -10.0], [0.0, 0.0], [1e-8, 1e-8])
