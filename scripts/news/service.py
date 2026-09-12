@@ -10,6 +10,7 @@ from ..cache import CACHE
 from ..http_client import request_bytes, request_json
 from ..models import FinanceError
 from ..symbols import normalize, yahoo_symbol
+from . import llm_sentiment
 from .sentiment import analyze as sentiment_analysis
 
 GDELT_FAILURE_THRESHOLD = 2
@@ -88,9 +89,16 @@ def get_news(market: str, symbol: str, limit: int = 12, related_name: str | None
         seen.add(key)
         unique.append(item)
     unique = unique[:limit]
+    sentiment = sentiment_analysis(unique, entity=related_name or symbol)
+    if unique and llm_sentiment.enabled():
+        try:
+            llm_scores = llm_sentiment.score_items(unique)
+            sentiment = llm_sentiment.apply(sentiment, unique, llm_scores)
+        except FinanceError as exc:
+            failures.append({"provider": "llm-sentiment", "message": exc.message})
     result = {
         "asset": {"market": market, "symbol": symbol}, "items": unique,
-        "sentiment": sentiment_analysis(unique), "provider_failures": failures,
+        "sentiment": sentiment, "provider_failures": failures,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "cache": {"cached": False, "stale": False, "age_seconds": 0},
         "warnings": ["Sentiment confidence measures source and keyword evidence quality; it is not a return probability."],
