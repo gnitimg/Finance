@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 import re
 
 from ..analyzers.company_risk import analyze as company_risk_analysis
+from . import llm_sentiment
 from ..cache import CACHE
 from ..http_client import request_bytes, request_json
 from ..models import FinanceError
@@ -154,11 +155,12 @@ def get_news(market: str, symbol: str, limit: int = 12, related_name: str | None
             continue
         seen.add(key)
         unique.append(item)
+    result_ai = None
     unique = unique[:limit]
     sentiment = sentiment_analysis(unique, entity=related_name or symbol)
     result = {
         "asset": {"market": market, "symbol": symbol}, "items": unique,
-        "sentiment": sentiment, "provider_failures": failures,
+        "sentiment": sentiment, "ai_events": result_ai, "provider_failures": failures,
         "providers_checked": sorted(providers_checked),
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "cache": {"cached": False, "stale": False, "age_seconds": 0},
@@ -172,6 +174,12 @@ def get_news(market: str, symbol: str, limit: int = 12, related_name: str | None
         as_of=result["generated_at"],
         structured=risk_reports(market, symbol, security_name=related_name or symbol) or cached_risk_reports(market, symbol),
     )
+    try:
+        assessment = llm_sentiment.event_assessment(unique, entity=related_name or symbol)
+        if assessment:
+            result["ai_events"] = assessment
+    except Exception:
+        pass  # AI 评估可选:失败时确定性管线不受影响
     if unique:
         CACHE.set(cache_key, result)
         return result

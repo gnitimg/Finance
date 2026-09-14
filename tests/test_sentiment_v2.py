@@ -123,3 +123,33 @@ class StructuredRiskTests(unittest.TestCase):
         bars = [{"close": 10 + i * 0.05, "volume": 1000} for i in range(3)]
         result = sentiment_analyze(bars, {"change_pct": 0.2}, {"score": 0}, None, risk=None)
         self.assertNotIn("structured_risk", [f["key"] for f in result["factors"]])
+
+
+class EventAssessmentTests(unittest.TestCase):
+    def setUp(self):
+        self._registry_dir = tempfile.TemporaryDirectory()
+        self._original_registry_path = model_registry.CONFIG_PATH
+        model_registry.CONFIG_PATH = Path(self._registry_dir.name) / "model_endpoints.json"
+        self._original_cache = llm_sentiment.CACHE
+        llm_sentiment.CACHE = Cache(Path(self._registry_dir.name) / "cache.sqlite3")
+
+    def tearDown(self):
+        model_registry.CONFIG_PATH = self._original_registry_path
+        llm_sentiment.CACHE = self._original_cache
+        self._registry_dir.cleanup()
+
+    @patch.dict("os.environ", {"FINANCE_SENTIMENT_LLM_ENABLED": "true", "OPENCODE_ZEN_API_KEY": "test-key"}, clear=False)
+    @patch("scripts.news.llm_sentiment.urllib.request.urlopen")
+    def test_parses_direction_confidence(self, urlopen):
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps({"choices": [{"message": {"content": '{"direction": -0.7, "confidence": 0.8, "events": ["净利润下滑"]}'}}]}).encode()
+        response.__enter__.return_value = response
+        urlopen.return_value = response
+        items = [{"title": "净利润下降48%", "url": "https://x/1"}]
+        result = llm_sentiment.event_assessment(items, entity="测试公司")
+        self.assertAlmostEqual(result["direction"], -0.7)
+        self.assertAlmostEqual(result["confidence"], 0.8)
+
+    @patch.dict("os.environ", {}, clear=False)
+    def test_no_chat_model_returns_none(self):
+        self.assertIsNone(llm_sentiment.event_assessment([{"title": "x"}], entity="e"))

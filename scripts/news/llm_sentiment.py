@@ -5,6 +5,7 @@ import json
 import os
 import time
 import urllib.request
+from datetime import datetime, timezone
 
 from ..cache import CACHE
 from ..config import env_bool, read_json
@@ -180,3 +181,62 @@ def apply(sentiment: dict, items: list[dict], llm_scores: dict[str, float], meth
         "llm_scored": llm_used,
         "method": method,
     }
+
+
+EVENT_PROMPT = (
+    "你是财经事件评估器。根据给出的标题判断近期事件对公司股价数日维度综合影响。"
+    "只依据给定标题,禁止编造;没有明确方向就给接近 0 的值。"
+    "回复严格 JSON:{\"direction\": <-1..1>, \"confidence\": <0..1>, \"events\": [\"事件\", ...]}，events 最多 3 条。"
+)
+
+
+def event_assessment(items: list[dict], entity: str | None = None) -> dict | None:
+    """LLM assessment of recent event direction for the forecast live context.
+
+    Cached for 30 minutes per entity per day; returns None whenever the AI
+    path is off, so the deterministic forecast never depends on it.
+    """
+    if not enabled() or not items:
+        return None
+    if time.time() < _cooldown_until():
+        return None
+    endpoint, model, key = _provider_policy()
+    entity_key = (entity or "x").strip() or "x"
+    today = datetime.now(timezone.utc).date().isoformat()
+    cache_key = f"aievents:{entity_key}:{today}"
+    cached, _meta = CACHE.get(cache_key, 1800)
+    if cached is not None and isinstance(cached, dict):
+        return cached
+    headlines = [f"{index + 1}. {str(item.get('title') or '')[:160]}" for index, item in enumerate(items[:10])]
+    payload = {
+        "model": model, "temperature": 0.1, "max_tokens": 300,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": EVENT_PROMPT},
+            {"role": "user", "content": json.dumps({"entity": entity_key, "headlines": headlines}, ensure_ascii=False)},
+        ],
+    }
+    if "qwen3" in model.lower():
+        payload["enable_thinking"] = False
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(endpoint, data=body, method="POST", headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "User-Agent": "gnitimg-finance/1.0"})
+    timeout = max(10, min(int(os.getenv("FINANCE_SENTIMENT_LLM_TIMEOUT", "30")), 60))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        content = payload["choices"][0]["message"]["content"].strip()
+        if content.startswith("```"):
+            content = content.split("```")[1].removeprefix("json").strip()
+        start, end = content.find("{"), content.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        parsed = json.loads(content[start:end + 1])
+    except Exception as exc:
+        _record_failure()
+        raise FinanceError("SPECIALIST_UNAVAILABLE", f"事件评估失败: {type(exc).__name__}", "llm-events") from exc
+    direction = max(-1.0, min(1.0, float(parsed.get("direction") or 0)))
+    confidence = max(0.0, min(1.0, float(parsed.get("confidence") or 0)))
+    events = [str(e)[:80] for e in (parsed.get("events") or [])[:3]]
+    assessment = {"direction": round(direction, 3), "confidence": round(confidence, 3), "events": events, "model": model, "as_of": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")}
+    CACHE.set(cache_key, assessment)
+    return assessment

@@ -140,23 +140,30 @@ const sectorInfo = computed(() => data.value.sector || null)
 const insight = ref(null)
 const insightLoading = ref(false)
 const chatReady = ref(false)
+let insightSequence = 0
+const currentAssetKey = computed(() => `${state.market}:${state.symbol}`)
+async function generateInsight(auto = false) {
+  if (insightLoading.value) return
+  if (!chatReady.value) return
+  const key = currentAssetKey.value
+  const sequence = ++insightSequence
+  insightLoading.value = true
+  try {
+    const payload = await fetch('/api/insight', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ market: state.market, symbol: state.symbol }) })
+    const body = await payload.json()
+    if (!body.success) throw new Error(body.error?.message || 'AI 解读失败')
+    if (sequence !== insightSequence || key !== currentAssetKey.value) return
+    insight.value = { ...body.data.insight, asset_key: key, generated_at: body.generated_at }
+  } catch (error) { if (!auto) showToast(friendlyError(error.message)) }
+  finally { insightLoading.value = false }
+}
 async function refreshChatReady() {
   try {
     const payload = await fetchJson('/api/models')
     chatReady.value = Boolean(payload.data.slots?.chat?.enabled && payload.data.slots?.chat?.has_key)
   } catch { chatReady.value = false }
 }
-async function generateInsight() {
-  if (insightLoading.value) return
-  insightLoading.value = true
-  try {
-    const payload = await fetch('/api/insight', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ market: state.market, symbol: state.symbol }) })
-    const body = await payload.json()
-    if (!body.success) throw new Error(body.error?.message || 'AI 解读失败')
-    insight.value = body.data.insight
-  } catch (error) { showToast(friendlyError(error.message)) }
-  finally { insightLoading.value = false }
-}
+
 const modelSlots = ref({ chat: null, rerank: null, embedding: null })
 const modelFormOpen = ref('')
 const modelForms = reactive({ chat: {}, rerank: {}, embedding: {} })
@@ -661,6 +668,7 @@ async function loadAsset({ market = state.market, symbol = state.symbol, period 
     state.symbol = payload.data.asset.symbol
     state.period = period
     state.lastSync = new Date()
+    if (!quiet && chatReady.value) generateInsight(true)
     if (!quiet) {
       searchMarket.value = state.market
       searchSymbol.value = state.symbol
@@ -1029,10 +1037,10 @@ onBeforeUnmount(() => {
             <div v-for="risk in sortedRiskCategories" :key="risk.key" :class="[risk.status, risk.level ? `level-${risk.level}` : '']" :title="`${risk.description}${risk.level ? '（' + ({ high: '高风险', medium: '中风险', low: '低风险' })[risk.level] + '）' : ''}`"><span>{{ risk.label }}</span></div>
           </div>
         </section>
-        <div v-if="chatReady" class="insight-card">
+        <div v-if="chatReady && insight && insight.asset_key === currentAssetKey" class="insight-card">
           <div class="insight-head">
             <span class="insight-badge">AI 解读</span>
-            <p v-if="!insight && !insightLoading">基于已配置的对话模型与 finance skill 只读数据生成，供参考。</p>
+            <p v-if="!insightLoading">{{ chatReady ? '切换标的后将自动生成该标的的 AI 解读。' : '' }}</p>
             <em v-if="insight?.model">{{ insight.model }} · 工具调用 {{ (insight.tools_used || []).join(' / ') || '无' }}</em>
           </div>
           <template v-if="insight">
@@ -1041,7 +1049,7 @@ onBeforeUnmount(() => {
             <ul v-if="insight.risks?.length" class="insight-risks"><li v-for="risk in insight.risks" :key="risk">{{ risk }}</li></ul>
             <small v-if="insight.uncertainty">主要不确定性：{{ insight.uncertainty }}</small>
           </template>
-          <button v-else type="button" class="insight-go" :disabled="insightLoading" @click="generateInsight">{{ insightLoading ? '生成中…' : '生成 AI 解读' }}</button>
+          <button v-else type="button" class="insight-go" :disabled="insightLoading" @click="generateInsight()">{{ insightLoading ? '生成中…' : '重新生成' }}</button>
           <p class="insight-disclaimer">本节内容由大语言模型生成，具有不确定性，请谨慎参考；数据来自 finance skill 只读接口。</p>
         </div>
         <div v-if="state.news?.items?.length" class="news-list">

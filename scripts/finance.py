@@ -195,6 +195,9 @@ def analyze_asset(market: str, symbol: str, range_name: str = "3mo", interval: s
         company_risk = (related_content or {}).get("company_risk") or {}
         if company_risk.get("detected_count"):
             live_context = {**live_context, "risk": {"priority": company_risk.get("priority_score"), "detected": company_risk.get("detected_count")}}
+        ai_events = (related_content or {}).get("ai_events")
+        if ai_events:
+            live_context = {**live_context, "ai_events": {"direction": ai_events.get("direction"), "confidence": ai_events.get("confidence")}}
     market_ref = None
     if sector_payload and interval == "1d" and sector_payload.get("board_code"):
         market_ref = cached_market_reference(sector_payload.get("board_code"))
