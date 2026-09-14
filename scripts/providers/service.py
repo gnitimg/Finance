@@ -12,7 +12,7 @@ from .sina import quote_cn, quote_gb, quote_hf, quote_hk
 from .yahoo import chart
 
 
-TTL = {"cn": 2, "hk": 3, "us": 3, "crypto": 8, "etf": 3, "fund": 15, "future": 3, "metal": 3}
+TTL = {"cn": 2, "hk": 3, "us": 3, "crypto": 30, "etf": 3, "fund": 15, "future": 3, "metal": 3}
 STALE = {"cn": 900, "hk": 1800, "us": 1800, "crypto": 300, "etf": 1800, "fund": 3600, "future": 900, "metal": 900}
 
 

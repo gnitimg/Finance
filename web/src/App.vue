@@ -267,9 +267,18 @@ const unreadCount = computed(() => notifications.value.filter((item) => !item.re
 const tickerDuration = computed(() => Math.max(14, state.overview.length * 3.5))
 const activeTimeZone = computed(() => timeZoneMode.value === 'auto' ? browserTimeZone : timeZoneMode.value)
 
-function number(value, digits = 2) {
+function priceDigits(value) {
+  const p = Math.abs(Number(value) || 0)
+  if (p === 0) return 2
+  if (p < 0.05) return 5
+  if (p < 0.5) return 4
+  if (p < 5) return 3
+  return 2
+}
+function number(value, digits = null) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '—'
-  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits, minimumFractionDigits: digits }).format(Number(value))
+  const d = digits === null ? priceDigits(value) : digits
+  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: d, minimumFractionDigits: d }).format(Number(value))
 }
 function compact(value) {
   if (value === null || value === undefined) return '—'
@@ -364,9 +373,9 @@ function chartTooltip(params, chartData) {
   const title = isFuture ? `模型前瞻 · ${dateTime(axisValue)}` : dateTime(axisValue)
   const rows = points
     .filter((point) => point.value !== null && point.value !== undefined && !['成交量', '前瞻区间下界', '前瞻不确定区间'].includes(point.seriesName))
-    .map((point) => `${point.marker}${point.seriesName}<strong style="float:right;margin-left:24px">${number(point.value, Number(point.value) < 10 ? 3 : 2)}</strong>`)
+    .map((point) => `${point.marker}${point.seriesName}<strong style="float:right;margin-left:24px">${number(point.value)}</strong>`)
   const interval = chartData.future.intervals?.[axisValue]
-  if (interval) rows.push(`<span style="color:#9588c8">模型区间</span><strong style="float:right;margin-left:24px">${number(interval.lower, interval.lower < 10 ? 3 : 2)} – ${number(interval.upper, interval.upper < 10 ? 3 : 2)}</strong>`)
+  if (interval) rows.push(`<span style="color:#9588c8">模型区间</span><strong style="float:right;margin-left:24px">${number(interval.lower)} – ${number(interval.upper)}</strong>`)
   return [`<div style="margin-bottom:8px;color:#aeb7ad">${title}</div>`, ...rows].join('<br>')
 }
 function safeUrl(value) {
@@ -730,7 +739,7 @@ async function renderChart() {
       { type: 'category', data: chartData.axis, gridIndex: 1, boundaryGap: false, axisLine: { lineStyle: { color: '#394139' } }, axisTick: { show: false }, axisLabel: { show: false }, splitLine: { show: false } },
     ],
     yAxis: [
-      { type: 'value', scale: true, gridIndex: 0, position: 'right', axisLabel: { color: '#909990', fontSize: 11, formatter: (value) => number(value, value < 10 ? 3 : 1) }, axisLine: { show: false }, splitLine: { lineStyle: { color: '#1e2520' } } },
+      { type: 'value', scale: true, gridIndex: 0, position: 'right', axisLabel: { color: '#909990', fontSize: 11, formatter: (value) => number(value) }, axisLine: { show: false }, splitLine: { lineStyle: { color: '#1e2520' } } },
       { type: 'value', scale: true, gridIndex: 1, position: 'right', axisLabel: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
     ],
     dataZoom: [
@@ -913,10 +922,10 @@ onBeforeUnmount(() => {
             </button>
           </div>
           <div class="metrics">
-            <div><span>开盘价</span><strong>{{ number(quote.open, 3) }}</strong></div>
-            <div><span>日内高点</span><strong>{{ number(quote.high, 3) }}</strong></div>
-            <div><span>日内低点</span><strong>{{ number(quote.low, 3) }}</strong></div>
-            <div><span>昨收</span><strong>{{ number(quote.previous_close, 3) }}</strong></div>
+            <div><span>开盘价</span><strong>{{ number(quote.open) }}</strong></div>
+            <div><span>日内高点</span><strong>{{ number(quote.high) }}</strong></div>
+            <div><span>日内低点</span><strong>{{ number(quote.low) }}</strong></div>
+            <div><span>昨收</span><strong>{{ number(quote.previous_close) }}</strong></div>
             <div><span>较开盘</span><strong :class="openChangePct === null ? '' : openChangePct >= 0 ? 'positive' : 'negative'">{{ openChangePct === null ? '—' : `${openChangePct >= 0 ? '+' : ''}${number(openChangePct)}%` }}</strong></div>
             <div><span>成交量</span><strong>{{ compact(quote.volume) }}</strong></div>
             <div><span>RSI 14</span><strong>{{ number(technical.rsi14, 1) }}</strong></div>
