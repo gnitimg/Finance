@@ -1,4 +1,4 @@
-# GNITIMG Finance
+# Finance
 
 A Hermes-compatible finance Skill plus a Vue real-time research interface. Python owns market data, indicators, risk, news sentiment, position math, monitoring, and online model calibration. LLM use is optional and restricted to explicit L2 synthesis.
 
